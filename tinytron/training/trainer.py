@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import math
+import json
 import glob
 from tqdm.auto import tqdm
 from contextlib import contextmanager, nullcontext
@@ -33,6 +34,53 @@ from tinytron.utils import (
     get_model_params,
     compute_mfu,
 )
+
+ROUTER_DEBUG_KEYS = (
+    "router_margin_mean",
+    "router_margin_min",
+    "router_margin_p01",
+    "router_margin_p001",
+    "router_margin_le_1e-3_ratio",
+    "router_margin_le_1e-4_ratio",
+    "router_margin_le_1e-5_ratio",
+    "router_topk_entropy_norm",
+)
+def clip_grad_norm_moe(model, max_norm, expert_local_param_suffixes):
+    expert_params = []
+    non_expert_params = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad or p.grad is None: continue
+        is_expert = any(suffix in name for suffix in expert_local_param_suffixes)
+        if is_expert: 
+            expert_params.append(p)
+        else:
+            non_expert_params.append(p)
+
+    total_norm_sq = 0.0
+    for p in non_expert_params:
+        total_norm_sq += p.grad.norm(2).item() ** 2
+    
+    expert_norm_sq = 0.0
+    for p in expert_params:
+        expert_norm_sq += p.grad.norm(2).item() ** 2
+    
+    if expert_norm_sq > 0.0 or len(expert_params) > 0:
+        ep_group = parallel_state.get_ep_group()
+        if ep_group is not None and dist.get_world_size(ep_group) > 1:
+            device = next(model.parameters()).device
+            expert_norm_tensor = torch.tensor(expert_norm_sq, device=device)
+            dist.all_reduce(expert_norm_tensor, op=dist.ReduceOp.SUM, group=ep_group)
+            expert_norm_sq = expert_norm_tensor.item()
+    
+    total_norm_sq += expert_norm_sq
+    total_norm = total_norm_sq ** 0.5
+    
+    clip_coef = max_norm / (total_norm + 1e-6)
+    if clip_coef < 1.0:
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad.data.mul_(clip_coef)
+    return total_norm
 
 
 class Trainer:
@@ -104,7 +152,7 @@ class Trainer:
                         data = torch.randint(0, self.vocab_size, (self.seq_len+1,), dtype=torch.long)
                     x = data[:self.seq_len]
                     y = data[1:self.seq_len+1]
-                    return {"input_ids": x, "labels": y}
+                    return {"input_ids": x, "labels": y, "sample_idx": int(idx)}
             self.train_dataset = MockDataset(config.data.mock_data_num_samples, config.train.seq_len, deterministic=config.seed.deterministic, base_seed=config.seed.seed)
             if config.train.do_val:
                 self.val_dataset = MockDataset(config.data.mock_data_num_samples // 10, config.train.seq_len, deterministic=config.seed.deterministic, base_seed=config.seed.seed, seed_offset=1_000_000_000)
@@ -113,7 +161,12 @@ class Trainer:
             self.train_dataset = CustomDataset(dataset_path=config.data.dataset_path, split="train")
             if config.train.do_val:
                 self.val_dataset = CustomDataset(dataset_path=config.data.dataset_path, split="validation")
-        self.train_sampler = DistributedSampler(self.train_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank, shuffle=True)
+        self.train_sampler = DistributedSampler(
+            self.train_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=not config.seed.deterministic,
+        )
         self.train_loader = DataLoader(self.train_dataset, batch_size=config.train.batch_size, sampler=self.train_sampler, num_workers=config.data.num_workers, pin_memory=config.data.pin_memory)
         if config.train.do_val:
             self.val_sampler = DistributedSampler(self.val_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank, shuffle=False)
@@ -122,7 +175,12 @@ class Trainer:
             self.val_dataset = self.val_loader = None
 
     def _init_model(self, config: Config):
-        torch.set_float32_matmul_precision('high')
+        if config.train.disable_tf32:
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+            torch.set_float32_matmul_precision("highest")
+        else:
+            torch.set_float32_matmul_precision("high")
         self.model_config = config.model
         # self.model_config.seed = config.seed.seed
         model = GPT(self.model_config)
@@ -222,8 +280,14 @@ class Trainer:
         )
         if self.master_process:
             os.makedirs(self.log_dir, exist_ok=True)
-            self.log_file = os.path.join(self.log_dir, f"log.txt")
+            self.log_file = os.path.join(self.log_dir, f"log.jsonl")
             with open(self.log_file, "w") as f: # open for writing to clear the file
+                pass
+        self.route_trace_file = None
+        self._route_trace_missing_idx_warned = False
+        if self.master_process and config.model.moe_route_trace:
+            self.route_trace_file = os.path.join(self.log_dir, "moe_route_trace_rank0.jsonl")
+            with open(self.route_trace_file, "w") as f:
                 pass
 
     def _lr_scheduler(self, it: int, max_steps: int, warmup_steps: int, max_lr: float, min_lr: float) -> float:
@@ -271,12 +335,15 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad()
         loss_accum = 0.0
+        self._step_sample_indices: list[torch.Tensor | None] = []
         for micro_step in range(self.training_info["grad_accum_steps"]):
             try:
                 _, batch = next(self.train_loader_iter)
             except StopIteration:
                 self.train_loader_iter = enumerate(self.train_loader)
                 _, batch = next(self.train_loader_iter)
+            sample_idx = batch.get("sample_idx", None)
+            self._step_sample_indices.append(sample_idx.detach().cpu() if torch.is_tensor(sample_idx) else None)
             self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
             loss_accum += self._one_training_micro_step(config, micro_step, batch)
         # TODO: Refactor optimizer/grad communication by parameter group (dense/router vs expert-local).
@@ -295,6 +362,92 @@ class Trainer:
         self.one_step_results["lr"] = lr
         self.one_step_results["loss"] = loss_accum
         self.one_step_results["grad_norm"] = norm
+        self._dump_moe_route_trace(step)
+        router_stats = self._collect_moe_router_debug_stats()
+        if router_stats is not None:
+            self.one_step_results.update(router_stats)
+
+    def _dump_moe_route_trace(self, step: int):
+        if not self.config.model.use_moe or not self.config.model.moe_route_trace:
+            return
+        num_micro_steps = len(self._step_sample_indices)
+        records = []
+        for layer_idx, block in enumerate(self.raw_model.blocks):
+            mlp = getattr(block, "mlp", None)
+            pop_traces_fn = getattr(mlp, "pop_route_trace_tensors", None)
+            if pop_traces_fn is None:
+                continue
+            layer_traces = pop_traces_fn()
+            for micro_step in range(min(len(layer_traces), num_micro_steps)):
+                selected_local = layer_traces[micro_step].contiguous()
+                if self.sp_world_size > 1:
+                    gathered = [torch.empty_like(selected_local) for _ in range(self.sp_world_size)]
+                    dist.all_gather(gathered, selected_local, group=self.sp_group)
+                    if self.sp_rank != 0:
+                        continue
+                    selected = torch.cat(gathered, dim=1).cpu()
+                else:
+                    selected = selected_local.cpu()
+                if self.dp_rank != 0:
+                    continue
+                sample_idx = self._step_sample_indices[micro_step]
+                if sample_idx is None:
+                    if self.master_process and not self._route_trace_missing_idx_warned:
+                        print("[warn] moe_route_trace enabled but sample_idx is missing in data batch; route trace is skipped.")
+                        self._route_trace_missing_idx_warned = True
+                    continue
+                sample_idx = sample_idx.to(torch.long)
+                B, T_full, top_k = selected.shape
+                if sample_idx.numel() != B:
+                    continue
+                sample_ids = sample_idx.view(B, 1).expand(B, T_full).reshape(-1)
+                token_pos = torch.arange(T_full, dtype=torch.long).view(1, T_full).expand(B, T_full).reshape(-1)
+                experts = selected.reshape(B * T_full, top_k)
+                for i in range(B * T_full):
+                    records.append({
+                        "step": int(step),
+                        "micro_step": int(micro_step),
+                        "layer": int(layer_idx),
+                        "sample_idx": int(sample_ids[i].item()),
+                        "token_pos": int(token_pos[i].item()),
+                        "topk": [int(x) for x in experts[i].tolist()],
+                    })
+        if self.master_process and self.route_trace_file is not None and records:
+            with open(self.route_trace_file, "a") as f:
+                for row in records:
+                    f.write(json.dumps(row) + "\n")
+                f.flush()
+
+    def _collect_moe_router_debug_stats(self) -> dict[str, float] | None:
+        if not self.config.model.use_moe or not self.config.model.moe_router_debug:
+            return None
+
+        local_obs_count = 0.0
+        local_sums = {k: 0.0 for k in ROUTER_DEBUG_KEYS}
+        for block in self.raw_model.blocks:
+            mlp = getattr(block, "mlp", None)
+            pop_stats_fn = getattr(mlp, "pop_router_debug_stats", None)
+            if pop_stats_fn is None:
+                continue
+            for stats in pop_stats_fn():
+                local_obs_count += 1.0
+                for k in ROUTER_DEBUG_KEYS:
+                    local_sums[k] += float(stats.get(k, 0.0))
+
+        if local_obs_count <= 0:
+            return None
+
+        packed = torch.tensor(
+            [local_obs_count, *[local_sums[k] for k in ROUTER_DEBUG_KEYS]],
+            dtype=torch.float64,
+            device=f"cuda:{self.local_rank}",
+        )
+        dist.all_reduce(packed, op=dist.ReduceOp.SUM, group=self.dp_sp_group)
+        global_obs_count = max(packed[0].item(), 1.0)
+        reduced = {"router_debug_obs": global_obs_count}
+        for i, k in enumerate(ROUTER_DEBUG_KEYS, start=1):
+            reduced[k] = packed[i].item() / global_obs_count
+        return reduced
     
     def _resume_from_checkpoint(self, steps_per_epoch: int):
         ckpt_dir = self.config.ckpt.resume_path or self.log_dir
@@ -365,7 +518,15 @@ class Trainer:
                 if self.master_process:
                     tqdm.write(f"validation loss: {self.one_step_results['val_loss'].item():.4f}")
                 with open(self.log_file, "a") as f:
-                    f.write(f"{step} val {self.one_step_results['val_loss'].item():.4f}\n")
+                    log_data = {
+                        "experiment_id": self.config.logging.exp_name,
+                        "config": self.config.as_dict(),
+                        "step": step,
+                        "stage": "val",
+                        "loss": round(self.one_step_results['val_loss'].item(), 6)
+                    }
+                    f.write(json.dumps(log_data) + "\n")
+                    f.flush()
             # 3) save
             if self.config.ckpt.do_save and not self.config.train.debug and step > 0 and (step % self.config.ckpt.save_every_steps == 0 or last_step):
                 self.save(step)
@@ -375,11 +536,30 @@ class Trainer:
             tokens_processed = self.config.train.batch_size * self.config.train.seq_len * self.training_info["grad_accum_steps"] * self.dp_world_size
             tokens_per_sec = tokens_processed / dt
             mfu, actual, peak = compute_mfu(
-                self.raw_model, self.config.train.batch_size, self.config.train.seq_len, dt, self.training_info["grad_accum_steps"], dtype="bf16")
+                self.raw_model, self.config.train.batch_size, self.config.train.seq_len, dt, self.training_info["grad_accum_steps"], dtype=self.config.train.precision)
             if self.master_process:
-                tqdm.write(f"step {step:5d} | loss: {self.one_step_results['loss'].item():.6f} | lr {self.one_step_results['lr']:.4e} | grad norm: {self.one_step_results['grad_norm']:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f} | MFU: {mfu*100:.2f}%")
+                router_msg = ""
+                if "router_margin_p01" in self.one_step_results:
+                    router_msg = (
+                        f" | router_p01: {self.one_step_results['router_margin_p01']:.2e}"
+                        f" | router<=1e-4: {self.one_step_results['router_margin_le_1e-4_ratio']*100:.2f}%"
+                    )
+                tqdm.write(f"step {step:5d} | loss: {self.one_step_results['loss'].item():.6f} | lr {self.one_step_results['lr']:.4e} | grad norm: {self.one_step_results['grad_norm']:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f} | MFU: {mfu*100:.2f}%{router_msg}")
                 with open(self.log_file, "a") as f:
-                    f.write(f"{step} train {self.one_step_results['loss'].item():.6f}\n")
+                    log_data = {
+                        "experiment_id": self.config.logging.exp_name,
+                        "config": self.config.as_dict(),
+                        "step": step,
+                        "stage": "train",
+                        "loss": round(self.one_step_results['loss'].item(), 6),
+                        "lr": self.one_step_results['lr'],
+                        "grad_norm": round(self.one_step_results['grad_norm'], 4)
+                    }
+                    for k in ("router_debug_obs", *ROUTER_DEBUG_KEYS):
+                        if k in self.one_step_results:
+                            log_data[k] = self.one_step_results[k]
+                    f.write(json.dumps(log_data) + "\n")
+                    f.flush()
             self.results[step] = self.one_step_results
         dist.destroy_process_group()
 

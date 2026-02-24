@@ -72,6 +72,8 @@ class MoE(nn.Module):
         self.experts_up_weights = nn.Parameter(torch.empty(self.num_local_experts, self.intermediate_size, self.hidden_size, device=self.device))
         self.experts_down_weights = nn.Parameter(torch.empty(self.num_local_experts, self.hidden_size, self.intermediate_size, device=self.device))
         self.experts_act_fn = nn.SiLU()
+        self._router_debug_stats_buffer: list[dict[str, float]] = []
+        self._route_trace_tensors_buffer: list[torch.Tensor] = []
         self._init_expert_weights(config.seed, layer_idx)
     
     def _init_expert_weights(self, base_seed: int, layer_idx: int):
@@ -98,9 +100,13 @@ class MoE(nn.Module):
         ep_world_size = parallel_state.get_ep_world_size()
         # router_logits: (batch * N, n_experts)
         gate_logits = self.router(x) # [B, T, total_experts]
-        weights, selected_experts = torch.topk(gate_logits, self.top_k, dim=-1)
-        weights = F.softmax(weights, dim=-1).view(-1)      # [B * T * top_k]
-        selected_experts = selected_experts.view(-1)       # [B * T * top_k]
+        topk_out = torch.topk(gate_logits, self.top_k, dim=-1)
+        weights = F.softmax(topk_out.values, dim=-1).view(-1)      # [B * T * top_k]
+        selected_experts = topk_out.indices.view(-1)               # [B * T * top_k]
+        if self.config.moe_router_debug:
+            self._record_router_debug_stats(gate_logits, topk_out.indices)
+        if self.config.moe_route_trace:
+            self._route_trace_tensors_buffer.append(topk_out.indices.detach().to(torch.int32).contiguous())
         flat_x = x.view(-1, D).repeat_interleave(self.top_k, dim=0)
 
         target_ep_ranks = selected_experts // self.num_local_experts
@@ -166,3 +172,42 @@ class MoE(nn.Module):
         final_x = unpermuted_x.view(B * T, self.top_k, D).sum(dim=1)
 
         return final_x.reshape(B, T, D), gate_logits
+
+    def pop_router_debug_stats(self) -> list[dict[str, float]]:
+        stats = self._router_debug_stats_buffer
+        self._router_debug_stats_buffer = []
+        return stats
+
+    def pop_route_trace_tensors(self) -> list[torch.Tensor]:
+        traces = self._route_trace_tensors_buffer
+        self._route_trace_tensors_buffer = []
+        return traces
+
+    def _record_router_debug_stats(self, gate_logits: torch.Tensor, selected_experts: torch.Tensor):
+        with torch.no_grad():
+            next_rank = min(self.top_k + 1, self.num_experts)
+            if next_rank > self.top_k:
+                topk_plus = torch.topk(gate_logits, next_rank, dim=-1).values
+                boundary_margin = topk_plus[..., self.top_k - 1] - topk_plus[..., self.top_k]
+            else:
+                boundary_margin = torch.zeros_like(gate_logits[..., 0])
+
+            margin = boundary_margin.reshape(-1).float()
+            counts = torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts).float()
+            probs = counts / counts.sum().clamp(min=1.0)
+            valid_probs = probs[probs > 0]
+            entropy = -(valid_probs * valid_probs.log()).sum()
+            if self.num_experts > 1:
+                entropy = entropy / torch.log(torch.tensor(float(self.num_experts), device=entropy.device))
+
+            stats = {
+                "router_margin_mean": margin.mean().item(),
+                "router_margin_min": margin.min().item(),
+                "router_margin_p01": torch.quantile(margin, 0.01).item(),
+                "router_margin_p001": torch.quantile(margin, 0.001).item(),
+                "router_margin_le_1e-3_ratio": (margin <= 1e-3).float().mean().item(),
+                "router_margin_le_1e-4_ratio": (margin <= 1e-4).float().mean().item(),
+                "router_margin_le_1e-5_ratio": (margin <= 1e-5).float().mean().item(),
+                "router_topk_entropy_norm": entropy.item(),
+            }
+            self._router_debug_stats_buffer.append(stats)

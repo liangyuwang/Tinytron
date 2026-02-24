@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from itertools import islice
 from typing import List, Optional
 
 import torch
+import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -58,7 +60,7 @@ class PackedTokenDataset(Dataset):
             chunk = token_buffer[i * chunk_len : (i + 1) * chunk_len]
             x = torch.tensor(chunk[:-1], dtype=torch.long)
             y = torch.tensor(chunk[1:], dtype=torch.long)
-            self.samples.append({"input_ids": x, "labels": y})
+            self.samples.append({"input_ids": x, "labels": y, "sample_idx": int(i)})
 
         if len(self.samples) == 0:
             raise RuntimeError(
@@ -79,31 +81,39 @@ class OurTrainer(Trainer):
         if config.data.use_mock_data:
             return super()._init_dataset(config)
 
-        if self.master_process:
-            print(f"[dataset] loading streaming dataset: {dataset_cfg.hf_dataset_repo} split={dataset_cfg.hf_split}")
-
-        ds = load_dataset(
-            path=dataset_cfg.hf_dataset_repo,
-            name=dataset_cfg.hf_dataset_name,
-            split=dataset_cfg.hf_split,
-            streaming=True,
-        )
-
         self.tokenizer = AutoTokenizer.from_pretrained(dataset_cfg.tokenizer_name_or_path, use_fast=True)
         if self.tokenizer.eos_token is None:
             self.tokenizer.add_special_tokens({"eos_token": "<|endoftext|>"})
         assert config.model.vocab_size >= len(self.tokenizer), (
             f"model.vocab_size={config.model.vocab_size} < tokenizer_size={len(self.tokenizer)}"
         )
-        texts: List[str] = []
-        for ex in islice(ds, dataset_cfg.max_samples):
-            text = ex.get("text", None)
-            if not text or len(text) < dataset_cfg.min_chars:
-                continue
-            texts.append(text)
 
+        texts: List[str] = []
         if self.master_process:
+            print(
+                f"[dataset] loading streaming dataset: repo={dataset_cfg.hf_dataset_repo} "
+                f"name={dataset_cfg.hf_dataset_name} split={dataset_cfg.hf_split}"
+            )
+            ds = load_dataset(
+                path=dataset_cfg.hf_dataset_repo,
+                name=dataset_cfg.hf_dataset_name,
+                split=dataset_cfg.hf_split,
+                streaming=True,
+            )
+            if dataset_cfg.seed_shuffle_buffer > 0:
+                ds = ds.shuffle(buffer_size=dataset_cfg.seed_shuffle_buffer, seed=config.seed.seed)
+            for ex in islice(ds, dataset_cfg.max_samples):
+                text = ex.get("text", None)
+                if not text or len(text) < dataset_cfg.min_chars:
+                    continue
+                texts.append(text)
             print(f"[dataset] collected docs in memory: {len(texts)} (requested max_samples={dataset_cfg.max_samples})")
+        payload = [texts]
+        dist.broadcast_object_list(payload, src=0)
+        texts = payload[0]
+
+        if not isinstance(texts, list):
+            raise RuntimeError(f"Broadcasted dataset payload has unexpected type: {type(texts)}")
 
         train_texts = texts
 
@@ -124,7 +134,7 @@ class OurTrainer(Trainer):
             self.train_dataset,
             num_replicas=self.dp_world_size,
             rank=self.dp_rank,
-            shuffle=True,
+            shuffle=not config.seed.deterministic,
         )
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -144,7 +154,16 @@ def main():
     assert cfg.train.do_val == False
 
     global dataset_cfg
-    dataset_cfg = DatasetConfig()
+    dataset_cfg = DatasetConfig(
+        hf_dataset_repo=os.getenv("HF_DATASET_REPO", "HuggingFaceFW/fineweb-edu"),
+        hf_dataset_name=os.getenv("HF_DATASET_NAME") or None,
+        hf_split=os.getenv("HF_SPLIT", "train"),
+        tokenizer_name_or_path=os.getenv("HF_TOKENIZER", "gpt2"),
+        max_samples=int(os.getenv("HF_MAX_SAMPLES", "200000")),
+        min_chars=int(os.getenv("HF_MIN_CHARS", "50")),
+        add_eos_token=os.getenv("HF_ADD_EOS_TOKEN", "1").lower() not in {"0", "false", "no"},
+        seed_shuffle_buffer=int(os.getenv("HF_SHUFFLE_BUFFER", "0")),
+    )
 
     trainer = OurTrainer(cfg)
     trainer.train()

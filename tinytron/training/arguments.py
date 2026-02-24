@@ -44,6 +44,7 @@ def _add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
 
     # precision / compile / profiler
     g.add_argument("--precision", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
+    g.add_argument("--disable_tf32", action="store_true", help="disable TF32 matmul/cuDNN kernels for stricter numerical consistency")
     g.add_argument("--use_compile", action="store_true")
     g.add_argument("--use_profiler", action="store_true")
     g.add_argument("--steps_to_profile", type=int, nargs="+", default=[15, 20])
@@ -132,5 +133,6 @@ def _add_model_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     g.add_argument("--num_experts", type=int, default=128)
     g.add_argument("--num_experts_per_tok", type=int, default=8)
     g.add_argument("--moe_intermediate_size", type=int, default=256)
+    g.add_argument("--moe_router_debug", action="store_true", help="log MoE router top-k boundary statistics")
+    g.add_argument("--moe_route_trace", action="store_true", help="dump per-token MoE top-k routes for flip-rate comparison")
     return parser
-

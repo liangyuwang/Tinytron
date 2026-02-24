@@ -44,6 +44,7 @@ class TrainingConfig:
     debug: bool = False
 
     precision: str = "bf16"  # bf16/fp16/fp32
+    disable_tf32: bool = False
     use_compile: bool = False
     use_profiler: bool = False
     steps_to_profile: list[int] = field(default_factory=lambda: [15, 20])
@@ -126,6 +127,8 @@ class ModelConfig:
     num_experts: int = 128
     num_experts_per_tok: int = 8
     moe_intermediate_size: int = 256
+    moe_router_debug: bool = False
+    moe_route_trace: bool = False
 
 
 def build_config(args: argparse.Namespace) -> Config:
@@ -155,6 +158,7 @@ def build_config(args: argparse.Namespace) -> Config:
         grad_clip_value=args.grad_clip_value,
         debug=args.debug,
         precision=args.precision,
+        disable_tf32=args.disable_tf32,
         use_compile=args.use_compile,
         use_profiler=args.use_profiler,
         steps_to_profile=args.steps_to_profile,
@@ -200,6 +204,8 @@ def build_config(args: argparse.Namespace) -> Config:
         num_experts=args.num_experts,
         num_experts_per_tok=args.num_experts_per_tok,
         moe_intermediate_size=args.moe_intermediate_size,
+        moe_router_debug=args.moe_router_debug,
+        moe_route_trace=args.moe_route_trace,
     )
 
     cfg = Config(

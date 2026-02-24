@@ -4,6 +4,7 @@ import numpy as np
 import random
 import os
 import torch
+import warnings
 from typing import Any
 from packaging import version
 
@@ -17,7 +18,11 @@ def get_training_info(
     max_epochs=None,
 ) -> dict[str, Any]:
     """
-    Calculate training hyperparameters based on the dataset and hardware configuration and verify consistency if both max_steps and max_epochs are provided.
+    Calculate training hyperparameters based on the dataset and hardware configuration.
+
+    Priority rule:
+    - If max_steps is provided, max_steps is authoritative.
+    - If max_steps is not provided, derive max_steps from max_epochs.
 
     Args:
         num_samples (int): Total number of samples in the dataset.
@@ -32,7 +37,7 @@ def get_training_info(
         dict: A dictionary containing the computed training parameters.
 
     Raises:
-        ValueError: If neither max_steps nor max_epochs is provided, or if both are provided but inconsistent.
+        ValueError: If neither max_steps nor max_epochs is provided, or if dataset size is invalid.
     """
     if max_steps is None and max_epochs is None:
         raise ValueError("At least one of max_steps or max_epochs must be provided.")
@@ -42,19 +47,21 @@ def get_training_info(
     grad_accum_steps = int(global_token_batch_size / total_tokens_per_micro_step)
     total_tokens_in_dataset = num_samples * tokens_per_sample
 
-    if max_steps is not None and max_epochs is not None:
-        calculated_max_steps = int((max_epochs * total_tokens_in_dataset) / global_token_batch_size)
-        calculated_max_epochs = (max_steps * global_token_batch_size) / total_tokens_in_dataset
-        # Check if the provided max_steps and max_epochs are consistent
-        if not (calculated_max_steps == max_steps and int(calculated_max_epochs) == int(max_epochs)):
-            raise ValueError(f"Inconsistent max_steps and max_epochs based on the dataset and configuration. "
-                             f"Calculated max_steps from max_epochs: {calculated_max_steps}, provided max_steps: {max_steps}. "
-                             f"Calculated max_epochs from max_steps: {int(calculated_max_epochs)}, provided max_epochs: {max_epochs}.")
+    if total_tokens_in_dataset <= 0:
+        raise ValueError(
+            f"Invalid dataset token count: num_samples={num_samples}, tokens_per_sample={tokens_per_sample}."
+        )
 
-    elif max_steps is None:
-        max_steps = int((max_epochs * total_tokens_in_dataset) / global_token_batch_size)
-    elif max_epochs is None:
+    if max_steps is not None:
+        if max_epochs is not None:
+            warnings.warn(
+                f"Both max_steps={max_steps} and max_epochs={max_epochs} were provided; "
+                "max_steps takes precedence.",
+                stacklevel=2,
+            )
         max_epochs = (max_steps * global_token_batch_size) / total_tokens_in_dataset
+    else:
+        max_steps = int((max_epochs * total_tokens_in_dataset) / global_token_batch_size)
 
     return {
         "epochs": max_epochs,

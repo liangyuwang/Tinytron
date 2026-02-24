@@ -5,6 +5,7 @@ GPU_PEAK_FLOPS = {
     "V100": {"fp32": 15.7e12, "fp16": 125e12, "bf16": 0},
     "A100": {"fp32": 19.5e12, "fp16": 312e12, "bf16": 312e12},
     "A40":  {"fp32": 37.4e12, "fp16": 149e12, "bf16": 149e12},
+    "A5000": {"fp32": 27.8e12, "fp16": 111.2e12, "bf16": 111.2e12},
     "A30":  {"fp32": 10.3e12, "fp16": 165e12, "bf16": 165e12},
     "RTX 6000 Ada": {"fp32": 91e12, "fp16": 181e12, "bf16": 181e12},
     "L4":   {"fp32": 30e12, "fp16": 120e12, "bf16": 120e12},
@@ -18,6 +19,8 @@ GPU_PEAK_FLOPS = {
     "H20":  {"fp32": 21e12, "fp16": 494e12, "bf16": 494e12, "fp8": 988e12},
 }
 
+_WARNED_GPU_DTYPE: set[tuple[str, str]] = set()
+
 
 def get_gpu_peak_flops(dtype="bf16", per_device=True):
     """Detect GPU type and return theoretical peak FLOPs/s (for all GPUs)."""
@@ -29,7 +32,10 @@ def get_gpu_peak_flops(dtype="bf16", per_device=True):
             peak = v.get(dtype, None)
             break
     if peak is None or peak == 0:
-        print(f"Warning: unknown or unsupported FLOPs for GPU {gpu_name} with dtype {dtype}")
+        warn_key = (gpu_name, dtype)
+        if warn_key not in _WARNED_GPU_DTYPE:
+            print(f"Warning: unknown or unsupported FLOPs for GPU {gpu_name} with dtype {dtype}")
+            _WARNED_GPU_DTYPE.add(warn_key)
         peak = 0
     num_gpus = torch.cuda.device_count()
     return peak if per_device else peak * num_gpus
