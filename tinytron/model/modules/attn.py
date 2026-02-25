@@ -96,6 +96,7 @@ class Attention(nn.Module):
         self.n_embd = config.hidden_size
         self.dropout = config.dropout
         self.pos = None
+        self.attn_fn = F.scaled_dot_product_attention
         # key, query, value projections for all heads, but in a batch        
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False, device=self.device)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False, device=self.device)
@@ -172,7 +173,7 @@ class Attention(nn.Module):
 
         # local attention computation
         dropout_p = self.dropout if self.training else 0.0
-        y = F.scaled_dot_product_attention(
+        y = self.attn_fn(
             q_local, k_local, v_local, 
             attn_mask=None, dropout_p=dropout_p, is_causal=True
         )
