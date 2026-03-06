@@ -150,6 +150,7 @@ When running under some distributed training platforms, You do not need to speci
 ### 3. Custom Dataset
 
 Use the example entry point and override `_init_dataset`: see `pretrain_example.py` for a subclass that uses a real dataset and tokenizer. The base implementation (mock data) lives in `tinytron/training/trainer.py`; override it in your entry script or subclass `Trainer` and pass your dataset there.
+You can also use [Streaming-Dataloader](https://github.com/liangyuwang/Streaming-Dataloader) to build a memory-efficient streaming dataset pipeline for LLM pretraining.
 
 ### 4. Auto-Tune Throughput (`tok/sec`)
 
