@@ -16,6 +16,7 @@ from tinytron.training.config import Config
 from tinytron.model.gpt import EXPERT_LOCAL_PARAM_SUFFIXES
 from tinytron.distributed import allreduce_non_expert_grads_across_sp
 
+from external.streaming_dataloader.dataset import DistributedDataset
 
 
 @dataclass
@@ -60,56 +61,6 @@ def parse_args():
     return parser.parse_args()
 
 
-class LenDistributedDataset:
-    """
-    Small wrapper around Streaming-Dataloader DistributedDataset to provide __len__,
-    because Tinytron Trainer calls len(train_dataset) during initialization.
-    """
-
-    def __init__(
-        self,
-        data_dir: str,
-        seq_len: int,
-        shuffle: bool,
-        seed: int,
-        strict: bool,
-        global_skip_batches: int,
-        dp_rank: int,
-        dp_world_size: int,
-    ):
-        # local import so Tinytron can still run without this module when unused
-        from external.streaming_dataloader.dataset import DistributedDataset
-
-        self.ds = DistributedDataset(
-            data_dir=data_dir,
-            seq_len=seq_len,
-            shuffle=shuffle,
-            seed=seed,
-            strict=strict,
-            global_skip_batches=global_skip_batches,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-        )
-
-        # expose useful attrs
-        self.total_samples = self.ds.total_samples
-        self.total_tokens = self.ds.total_tokens
-        self.block_size = self.ds.block_size
-
-    def __len__(self):
-        return self.total_samples
-
-    def __iter__(self):
-        return iter(self.ds)
-
-    def set_epoch(self, epoch: int):
-        if hasattr(self.ds, "set_epoch"):
-            self.ds.set_epoch(epoch)
-
-    def __getattr__(self, name):
-        return getattr(self.ds, name)
-
-
 class OurTrainer(Trainer):
     def _init_dataset(self, config: Config):
         if config.data.use_mock_data:
@@ -120,7 +71,7 @@ class OurTrainer(Trainer):
         if self.master_process:
             print(f"[dataset] loading Streaming-Dataloader from: {data_dir}")
 
-        self.train_dataset = LenDistributedDataset(
+        self.train_dataset = DistributedDataset(
             data_dir=data_dir,
             seq_len=config.train.seq_len,
             shuffle=dataset_cfg.shuffle,
