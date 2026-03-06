@@ -46,7 +46,7 @@ class Trainer:
             print(f"Training config: {config.as_dict()}")
         self._init_dataset(config)
         self.training_info = get_training_info(
-            len(self.train_dataset), config.train.seq_len, config.train.total_batch_size, config.train.batch_size, self.dp_world_size, config.train.max_steps, config.train.max_epochs)
+            self.num_train_samples, config.train.seq_len, config.train.total_batch_size, config.train.batch_size, self.dp_world_size, config.train.max_steps, config.train.max_epochs)
         if config.optim.warmup_steps >= self.training_info["max_steps"]:
             raise ValueError(f"warmup_steps must be < max_steps. Got warmup_steps={config.optim.warmup_steps}, max_steps={self.training_info['max_steps']}.")
         if self.master_process:
@@ -120,6 +120,7 @@ class Trainer:
             self.val_loader = DataLoader(self.val_dataset, batch_size=config.train.batch_size, sampler=self.val_sampler, num_workers=config.data.num_workers, pin_memory=config.data.pin_memory)
         else:
             self.val_dataset = self.val_loader = None
+        self.num_train_samples = len(self.train_dataset)
 
     def _init_model(self, config: Config):
         torch.set_float32_matmul_precision('high')

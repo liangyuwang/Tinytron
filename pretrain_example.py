@@ -135,6 +135,7 @@ class OurTrainer(Trainer):
         )
         self.val_sampler = None
         self.val_loader = None
+        self.num_train_samples = len(self.train_dataset)
 
 
 def main():
