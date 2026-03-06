@@ -145,6 +145,7 @@ class OurTrainer(Trainer):
             drop_last=False,
         )
         self.val_loader = None
+        self.num_train_samples = self.train_dataset.total_samples
 
         if self.master_process:
             print(f"[dataset] total_tokens={self.train_dataset.total_tokens}")
