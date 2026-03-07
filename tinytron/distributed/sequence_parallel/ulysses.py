@@ -1,6 +1,8 @@
 import torch
 import torch._dynamo
 import torch.distributed as dist
+from torch.nn.utils import parameters_to_vector, vector_to_parameters
+
 
 class UlyssesAllToAll(torch.autograd.Function):
     @staticmethod
@@ -24,21 +26,64 @@ def ulysses_all_to_all(input_tensor, sp_group):
     return UlyssesAllToAll.apply(input_tensor, sp_group)
 
 
+@torch.no_grad()
 def allreduce_non_expert_grads_across_sp(
     model,
     sp_group,
     sp_world_size: int,
     expert_local_param_suffixes: tuple[str, ...],
+    bucket_size_mb: int = 400,
 ):
+    def _yield_tensor_buckets(
+        tensors: list[torch.Tensor],
+        bucket_size_mb: int,
+    ):
+        bucket_size_bytes = max(1, bucket_size_mb) * 1024 * 1024
+        current_bucket: list[torch.Tensor] = []
+        current_bucket_bytes = 0
+
+        for tensor in tensors:
+            tensor_bytes = tensor.numel() * tensor.element_size()
+
+            # If adding this tensor would overflow the bucket, flush current bucket first.
+            if current_bucket and current_bucket_bytes + tensor_bytes > bucket_size_bytes:
+                yield current_bucket
+                current_bucket = []
+                current_bucket_bytes = 0
+
+            # A single large tensor may exceed bucket_size_bytes and will form its own bucket.
+            current_bucket.append(tensor)
+            current_bucket_bytes += tensor_bytes
+
+        if current_bucket:
+            yield current_bucket
+
+    def _allreduce_tensor_bucket(
+        tensors: list[torch.Tensor],
+        group,
+    ):
+        flat_buffer = parameters_to_vector(tensors)
+        dist.all_reduce(flat_buffer, op=dist.ReduceOp.SUM, group=group)
+        # flat_buffer.div_(sp_world_size)  # enable if average is desired
+        vector_to_parameters(flat_buffer, tensors)
+
     if sp_world_size <= 1:
         return
+
+    grads_by_device_dtype: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
     for name, param in model.named_parameters():
         grad = param.grad
         if grad is None:
             continue
         if name.endswith(expert_local_param_suffixes):
             continue
-        dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=sp_group)
+
+        key = (grad.device, grad.dtype)
+        grads_by_device_dtype.setdefault(key, []).append(grad)
+
+    for grads in grads_by_device_dtype.values():
+        for bucket in _yield_tensor_buckets(grads, bucket_size_mb=bucket_size_mb):
+            _allreduce_tensor_bucket(bucket, group=sp_group)
 
 # Example usage
 if __name__ == "__main__":
