@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import math
 import glob
+import random
 from tqdm.auto import tqdm
 from contextlib import contextmanager, nullcontext
 from itertools import cycle, islice
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 import numpy as np
 import time
 import torch
@@ -121,6 +122,10 @@ class Trainer:
         else:
             self.val_dataset = self.val_loader = None
         self.num_train_samples = len(self.train_dataset)
+        self.train_sampler_epoch = 0
+        self.train_loader_iter_idx = 0
+        if self.train_sampler is not None:
+            self.train_sampler.set_epoch(self.train_sampler_epoch)
 
     def _init_model(self, config: Config):
         torch.set_float32_matmul_precision('high')
@@ -273,11 +278,7 @@ class Trainer:
         self.optimizer.zero_grad()
         loss_accum = 0.0
         for micro_step in range(self.training_info["grad_accum_steps"]):
-            try:
-                _, batch = next(self.train_loader_iter)
-            except StopIteration:
-                self.train_loader_iter = enumerate(self.train_loader)
-                _, batch = next(self.train_loader_iter)
+            batch = self._next_train_batch()
             self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
             loss_accum += self._one_training_micro_step(config, micro_step, batch)
         # TODO: Refactor optimizer/grad communication by parameter group (dense/router vs expert-local).
@@ -297,7 +298,20 @@ class Trainer:
         self.one_step_results["loss"] = loss_accum
         self.one_step_results["grad_norm"] = norm
     
-    def _resume_from_checkpoint(self, steps_per_epoch: int):
+    def _next_train_batch(self):
+        try:
+            iter_idx, batch = next(self.train_loader_iter)
+        except StopIteration:
+            self.train_sampler_epoch += 1
+            self.train_loader_iter_idx = 0
+            if self.train_sampler is not None:
+                self.train_sampler.set_epoch(self.train_sampler_epoch)
+            self.train_loader_iter = enumerate(self.train_loader)
+            iter_idx, batch = next(self.train_loader_iter)
+        self.train_loader_iter_idx = iter_idx + 1
+        return batch
+
+    def _resume_from_checkpoint(self):
         ckpt_dir = self.config.ckpt.resume_path or self.log_dir
         pattern = os.path.join(ckpt_dir, "*_model.pt")
         ckpts = sorted(glob.glob(pattern))
@@ -306,22 +320,26 @@ class Trainer:
             return
         ckpt_prefix = ckpts[-1].replace("_model.pt", "")
         meta_path = f"{ckpt_prefix}_meta.pt"
-        meta = torch.load(meta_path, map_location=f'cuda:{self.local_rank}')
+        meta = torch.load(meta_path, map_location="cpu")
         # 1) model
-        state_dict = torch.load(f"{ckpt_prefix}_model.pt", map_location=f'cuda:{self.local_rank}', weights_only=True)
+        state_dict = torch.load(f"{ckpt_prefix}_model.pt", map_location="cpu", weights_only=True)
         self.raw_model.load_state_dict(state_dict)
         # 2) optimizer
-        opt_state_placeholder = {f"optimizer/rank{self.rank}": self.raw_optimizer.state_dict()}
+        opt_key = f"optimizer/rank{self.rank}"
+        opt_state_placeholder = {opt_key: self.raw_optimizer.state_dict()}
         state_dict_loader.load(
             state_dict=opt_state_placeholder,
             storage_reader=FileSystemReader(f"{ckpt_prefix}_opt"),
         )
+        self.raw_optimizer.load_state_dict(opt_state_placeholder[opt_key])
         # 3) dataset state
         sampler_state = meta.get('sampler_state', {})
-        epoch = sampler_state.get('epoch', 0)
-        iter_idx = sampler_state.get('iter_idx', 0)
-        if hasattr(self, 'train_sampler') and self.train_loader.sampler is not None:
-            self.train_loader.sampler.set_epoch(epoch)
+        epoch = int(sampler_state.get('epoch', 0))
+        iter_idx = int(sampler_state.get('iter_idx', 0))
+        self.train_sampler_epoch = epoch
+        self.train_loader_iter_idx = iter_idx
+        if self.train_sampler is not None:
+            self.train_sampler.set_epoch(epoch)
         self.train_loader_iter = enumerate(islice(self.train_loader, iter_idx, None), start=iter_idx)
         # 4) next step 
         step = meta.get('step', None)
@@ -336,14 +354,15 @@ class Trainer:
             torch.set_rng_state(rng['torch'].to(torch.uint8).cpu())
             torch.cuda.set_rng_state(rng['cuda'].to(torch.uint8).cpu(), self.local_rank)
             np.random.set_state(rng['numpy'])
+            if 'python' in rng:
+                random.setstate(rng['python'])
         dist.barrier()
         torch.cuda.synchronize()
     
     def train(self):
         self.results = {}
-        steps_per_epoch = max(1, len(self.train_loader) // self.training_info['grad_accum_steps'])
         self.train_loader_iter = enumerate(self.train_loader)
-        self._resume_from_checkpoint(steps_per_epoch)
+        self._resume_from_checkpoint()
         # training loop
         self._init_profiler(self.config)
         if self.profiler:
@@ -411,10 +430,8 @@ class Trainer:
     def save(self, step: int | None = None):
         # optionally write model checkpoints
         checkpoint_path = os.path.join(self.log_dir, f"{step:05d}")
-        steps_per_epoch = max(1, len(self.train_loader) // self.training_info['grad_accum_steps'])
-        next_step = (step if step is not None else 0) + 1
-        sampler_epoch_next = next_step // steps_per_epoch
-        sampler_iter_idx_next = (next_step % steps_per_epoch) * self.training_info['grad_accum_steps']
+        rng_dir = f"{checkpoint_path}_rng"
+        os.makedirs(rng_dir, exist_ok=True)
         state_dict_saver.save(
             state_dict={f"optimizer/rank{self.rank}": self.raw_optimizer.state_dict()},
             storage_writer=FileSystemWriter(f"{checkpoint_path}_opt"),
@@ -423,20 +440,22 @@ class Trainer:
             'torch': torch.get_rng_state(),
             'cuda': torch.cuda.get_rng_state(self.local_rank),
             'numpy': np.random.get_state(),
+            'python': random.getstate(),
         }
-        torch.save(rng_state, f"{checkpoint_path}_rng/rank{self.rank}.pt")
+        torch.save(rng_state, os.path.join(rng_dir, f"rank{self.rank}.pt"))
+        dist.barrier()
         if self.master_process:
             torch.save(self.raw_model.state_dict(), f"{checkpoint_path}_model.pt")
             checkpoint = {
-                'trainer_config': self.config.as_dict(),
-                'model_config': self.raw_model.config.as_dict(),
+                'config': self.config.as_dict(),
                 'step': step,
                 'this_step_results': self.one_step_results,
                 'opt_part_assignment': self.optimizer.part_assignment if hasattr(self.optimizer, 'part_assignment') else None,
                 'sampler_state': {
-                    'epoch': sampler_epoch_next,
-                    'iter_idx': sampler_iter_idx_next,
+                    'epoch': self.train_sampler_epoch,
+                    'iter_idx': self.train_loader_iter_idx,
                 },
                 'rng_state': rng_state,
             }
             torch.save(checkpoint, f"{checkpoint_path}_meta.pt")
+        dist.barrier()
