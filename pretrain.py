@@ -215,7 +215,7 @@ class OurTrainer(Trainer):
             )
 
         # 5) RNG
-        rng_path = f"{ckpt_prefix}_rng_rank{self.rank}.pt"
+        rng_path = f"{ckpt_prefix}_rng/rank{self.rank}.pt"
         if os.path.exists(rng_path):
             rng = torch.load(rng_path, map_location="cpu")
             torch.set_rng_state(rng["torch"].to(torch.uint8).cpu())
@@ -256,7 +256,7 @@ class OurTrainer(Trainer):
             "cuda": torch.cuda.get_rng_state(self.local_rank),
             "numpy": np.random.get_state(),
         }
-        torch.save(rng_state, f"{checkpoint_path}_rng_rank{self.rank}.pt")
+        torch.save(rng_state, f"{checkpoint_path}_rng/rank{self.rank}.pt")
 
         if self.master_process:
             torch.save(self.raw_model.state_dict(), f"{checkpoint_path}_model.pt")
