@@ -130,12 +130,16 @@ class OurTrainer(Trainer):
             self.train_dataset,
             batch_size=config.train.batch_size,
             sampler=self.train_sampler,
-            num_workers=0,
-            pin_memory=True,
+            num_workers=config.data.num_workers,
+            pin_memory=config.data.pin_memory,
         )
         self.val_sampler = None
         self.val_loader = None
         self.num_train_samples = len(self.train_dataset)
+        self.train_sampler_epoch = 0
+        self.train_loader_iter_idx = 0
+        if self.train_sampler is not None:
+            self.train_sampler.set_epoch(self.train_sampler_epoch)
 
 
 def main():
