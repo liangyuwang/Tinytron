@@ -32,12 +32,12 @@ MASTER_PORT=${MASTER_PORT:-29500}
 # ----------------
 # Custom config
 # ----------------
-EXP_NAME=${EXP_NAME:-streaming_gpt_0.25b}
+EXP_NAME=${EXP_NAME:-fineweb_edu_gpt_1.3b}
 LOG_DIR=${LOG_DIR:-./log}
 
 SEED=${SEED:-1337}
 
-LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-500}
+LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-2000}
 MAX_LR=${MAX_LR:-3.6e-3}
 MIN_LR=${MIN_LR:-6e-5}
 
