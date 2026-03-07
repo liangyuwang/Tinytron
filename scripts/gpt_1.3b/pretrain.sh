@@ -32,7 +32,7 @@ MASTER_PORT=${MASTER_PORT:-29500}
 # ----------------
 # Custom config
 # ----------------
-EXP_NAME=${EXP_NAME:-fineweb_edu_gpt_1.3b}
+EXP_NAME=${EXP_NAME:-fineweb_edu_100bt_gpt_1.3b}
 LOG_DIR=${LOG_DIR:-./log}
 
 SEED=${SEED:-1337}
@@ -62,7 +62,7 @@ DEBUG=${DEBUG:-0}
 DETER_MODE=${DETER_MODE:-0}
 
 # Save / resume
-DO_SAVE=${DO_SAVE:-1}
+DO_SAVE=${DO_SAVE:-0}
 SAVE_EVERY_STEPS=${SAVE_EVERY_STEPS:-500}
 RESUME=${RESUME:-0}
 RESUME_PATH=${RESUME_PATH:-}
