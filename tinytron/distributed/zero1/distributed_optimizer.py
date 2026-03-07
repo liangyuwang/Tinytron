@@ -1,7 +1,8 @@
 import torch
 import torch.distributed as dist
 import heapq
-from collections import OrderedDict
+import logging
+from collections import OrderedDict, defaultdict
 
 class DistributedOptimizer:
     def __init__(
@@ -23,6 +24,12 @@ class DistributedOptimizer:
             self.num_parts = self.world_size
         assert 1 <= self.num_parts <= self.world_size
         self.apply_zero1()
+        self.use_bucketed_broadcast = hasattr(dist, "_broadcast_coalesced")
+        if not self.use_bucketed_broadcast:
+            logging.warning(
+                f"PyTorch internal API '_broadcast_coalesced' not found. "
+                f"Falling back to uncoalesced dist.broadcast() loop. "
+                f"This may increase communication latency.")
 
     def apply_zero1(self, part_assignment = None):
         """
@@ -112,11 +119,27 @@ class DistributedOptimizer:
         # Early exit for single-process runs
         if self.world_size == 1:
             return
+        if self.use_bucketed_broadcast:
+            return self._bucketed_broadcast_all_params_from_owners()
         for key, p in self.tensor_dict.items():
             group_src = self.part_assignment[key]
             # All ranks call broadcast for this tensor, using the same src
             src = dist.get_global_rank(self.process_group, group_src)
             dist.broadcast(p.data, src=src, group=self.process_group)
+
+    @torch.no_grad()
+    def _bucketed_broadcast_all_params_from_owners(self, bucket_size_mb: int = 25):
+        if self.world_size == 1:
+            return
+        tensors_by_src = defaultdict(list)
+        for key, p in self.tensor_dict.items():
+            group_src = self.part_assignment[key]
+            src = dist.get_global_rank(self.process_group, group_src)
+            tensors_by_src[src].append(p.data)
+        buffer_size = bucket_size_mb * 1024 * 1024
+        for src in sorted(tensors_by_src.keys()):
+            tensors = tensors_by_src[src]
+            dist._broadcast_coalesced(self.process_group, tensors, buffer_size, src=src)
 
 
 def partition_tensors(
