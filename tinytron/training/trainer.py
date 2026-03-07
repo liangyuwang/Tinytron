@@ -231,6 +231,7 @@ class Trainer:
             self.log_file = os.path.join(self.log_dir, f"log.txt")
             with open(self.log_file, "w") as f: # open for writing to clear the file
                 pass
+        dist.barrier()
 
     def _lr_scheduler(self, it: int, max_steps: int, warmup_steps: int, max_lr: float, min_lr: float) -> float:
         # 1) linear warmup for warmup_iters steps
