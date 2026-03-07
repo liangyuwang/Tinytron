@@ -32,7 +32,7 @@ def allreduce_non_expert_grads_across_sp(
     sp_group,
     sp_world_size: int,
     expert_local_param_suffixes: tuple[str, ...],
-    bucket_size_mb: int = 25,
+    bucket_size_mb: int = 400,
 ):
     def _yield_tensor_buckets(
         tensors: list[torch.Tensor],

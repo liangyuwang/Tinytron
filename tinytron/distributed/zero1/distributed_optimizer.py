@@ -128,7 +128,7 @@ class DistributedOptimizer:
             dist.broadcast(p.data, src=src, group=self.process_group)
 
     @torch.no_grad()
-    def _bucketed_broadcast_all_params_from_owners(self, bucket_size_mb: int = 25):
+    def _bucketed_broadcast_all_params_from_owners(self, bucket_size_mb: int = 400):
         if self.world_size == 1:
             return
         tensors_by_src = defaultdict(list)
