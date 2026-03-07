@@ -15,6 +15,7 @@ from torch.distributed.checkpoint.filesystem import FileSystemWriter, FileSystem
 from tinytron.training import Trainer, build_config, build_parser
 from tinytron.training.config import Config
 
+# git clone https://github.com/liangyuwang/Streaming-Dataloader.git external/streaming_dataloader
 from external.streaming_dataloader.dataset import DistributedDataset
 
 
