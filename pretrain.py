@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import glob
+import random
 import numpy as np
 from dataclasses import dataclass
 
@@ -13,8 +14,6 @@ from torch.distributed.checkpoint.filesystem import FileSystemWriter, FileSystem
 
 from tinytron.training import Trainer, build_config, build_parser
 from tinytron.training.config import Config
-from tinytron.model.gpt import EXPERT_LOCAL_PARAM_SUFFIXES
-from tinytron.distributed import allreduce_non_expert_grads_across_sp
 
 from external.streaming_dataloader.dataset import DistributedDataset
 
@@ -97,6 +96,7 @@ class OurTrainer(Trainer):
         )
         self.val_loader = None
         self.num_train_samples = self.train_dataset.total_samples
+        self.train_loader_iter_idx = 0
 
         if self.master_process:
             print(f"[dataset] total_tokens={self.train_dataset.total_tokens}")
@@ -108,60 +108,22 @@ class OurTrainer(Trainer):
                 f"dp_world_size={self.dp_world_size}"
             )
 
-    def _one_training_step(self, config: Config, step: int):
-        """
-        Same logic as Tinytron Trainer._one_training_step, but when the iterable
-        dataset is exhausted we advance the dataset epoch and rebuild the iterator,
-        so Streaming-Dataloader can reshuffle across passes when shuffle=True.
-        """
-        self.model.train()
-        self.optimizer.zero_grad()
-        loss_accum = 0.0
+    def _next_train_batch(self):
+        try:
+            iter_idx, batch = next(self.train_loader_iter)
+        except StopIteration:
+            if hasattr(self.train_dataset, "set_epoch"):
+                current_epoch = getattr(self.train_dataset, "epoch", 0)
+                self.train_dataset.set_epoch(current_epoch + 1)
+                if self.master_process:
+                    print(f"[dataset] restart iterator at dataset epoch={current_epoch + 1}")
+            self.train_loader_iter_idx = 0
+            self.train_loader_iter = enumerate(self.train_loader)
+            iter_idx, batch = next(self.train_loader_iter)
+        self.train_loader_iter_idx = iter_idx + 1
+        return batch
 
-        for micro_step in range(self.training_info["grad_accum_steps"]):
-            try:
-                _, batch = next(self.train_loader_iter)
-            except StopIteration:
-                if hasattr(self.train_dataset, "set_epoch"):
-                    current_epoch = getattr(self.train_dataset, "epoch", 0)
-                    self.train_dataset.set_epoch(current_epoch + 1)
-                    if self.master_process:
-                        print(f"[dataset] restart iterator at dataset epoch={current_epoch + 1}")
-
-                self.train_loader_iter = enumerate(self.train_loader)
-                _, batch = next(self.train_loader_iter)
-
-            self.model.require_backward_grad_sync = (
-                micro_step == self.training_info["grad_accum_steps"] - 1
-            )
-            loss_accum += self._one_training_micro_step(config, micro_step, batch)
-
-        allreduce_non_expert_grads_across_sp(
-            model=self.raw_model,
-            sp_group=self.sp_group,
-            sp_world_size=self.sp_world_size,
-            expert_local_param_suffixes=EXPERT_LOCAL_PARAM_SUFFIXES,
-        )
-
-        norm = self.raw_model.clip_grad_norm(config.train.grad_clip_value)
-        lr = self._lr_scheduler(
-            step,
-            self.training_info["max_steps"],
-            config.optim.warmup_steps,
-            config.optim.max_lr,
-            config.optim.min_lr,
-        )
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-        self.optimizer.step()
-
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG, group=self.dp_group)
-
-        self.one_step_results["lr"] = lr
-        self.one_step_results["loss"] = loss_accum
-        self.one_step_results["grad_norm"] = norm
-
-    def _resume_from_checkpoint(self, steps_per_epoch: int):
+    def _resume_from_checkpoint(self):
         ckpt_dir = self.config.ckpt.resume_path or self.log_dir
         pattern = os.path.join(ckpt_dir, "*_model.pt")
         ckpts = sorted(glob.glob(pattern))
@@ -172,24 +134,24 @@ class OurTrainer(Trainer):
 
         ckpt_prefix = ckpts[-1].replace("_model.pt", "")
         meta_path = f"{ckpt_prefix}_meta.pt"
-        meta = torch.load(meta_path, map_location=f"cuda:{self.local_rank}")
+        meta = torch.load(meta_path, map_location="cpu")
 
         # 1) model
         state_dict = torch.load(
             f"{ckpt_prefix}_model.pt",
-            map_location=f"cuda:{self.local_rank}",
+            map_location="cpu",
             weights_only=True,
         )
         self.raw_model.load_state_dict(state_dict)
 
         # 2) optimizer
-        opt_state_placeholder = {
-            f"optimizer/rank{self.rank}": self.raw_optimizer.state_dict()
-        }
+        opt_key = f"optimizer/rank{self.rank}"
+        opt_state_placeholder = {opt_key: self.raw_optimizer.state_dict()}
         state_dict_loader.load(
             state_dict=opt_state_placeholder,
             storage_reader=FileSystemReader(f"{ckpt_prefix}_opt"),
         )
+        self.raw_optimizer.load_state_dict(opt_state_placeholder[opt_key])
 
         # 3) dataset state (streaming version)
         dataset_state = meta.get("dataset_state", {})
@@ -202,6 +164,7 @@ class OurTrainer(Trainer):
         if hasattr(self.train_dataset, "set_epoch"):
             self.train_dataset.set_epoch(epoch)
 
+        self.train_loader_iter_idx = 0
         self.train_loader_iter = enumerate(self.train_loader)
 
         # 4) next step
@@ -221,12 +184,16 @@ class OurTrainer(Trainer):
             torch.set_rng_state(rng["torch"].to(torch.uint8).cpu())
             torch.cuda.set_rng_state(rng["cuda"].to(torch.uint8).cpu(), self.local_rank)
             np.random.set_state(rng["numpy"])
+            if "python" in rng:
+                random.setstate(rng["python"])
 
         dist.barrier()
         torch.cuda.synchronize()
 
     def save(self, step: int | None = None):
         checkpoint_path = os.path.join(self.log_dir, f"{step:05d}")
+        rng_dir = f"{checkpoint_path}_rng"
+        os.makedirs(rng_dir, exist_ok=True)
 
         next_step = (step if step is not None else 0) + 1
 
@@ -255,15 +222,16 @@ class OurTrainer(Trainer):
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state(self.local_rank),
             "numpy": np.random.get_state(),
+            "python": random.getstate(),
         }
-        torch.save(rng_state, f"{checkpoint_path}_rng/rank{self.rank}.pt")
+        torch.save(rng_state, os.path.join(rng_dir, f"rank{self.rank}.pt"))
+        dist.barrier()
 
         if self.master_process:
             torch.save(self.raw_model.state_dict(), f"{checkpoint_path}_model.pt")
 
             checkpoint = {
-                "trainer_config": self.config.as_dict(),
-                "model_config": self.raw_model.config.as_dict(),
+                "config": self.config.as_dict(),
                 "step": step,
                 "this_step_results": self.one_step_results,
                 "opt_part_assignment": (
@@ -278,6 +246,7 @@ class OurTrainer(Trainer):
                 "rng_state": rng_state,
             }
             torch.save(checkpoint, f"{checkpoint_path}_meta.pt")
+        dist.barrier()
 
 
 def main():
