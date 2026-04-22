@@ -28,6 +28,10 @@ TOP_P=${TOP_P:-}
 EOS_TOKEN_ID=${EOS_TOKEN_ID:-}
 DEVICE=${DEVICE:-cuda}
 DTYPE=${DTYPE:-bf16}
+SEP_SIZE=${SEP_SIZE:-1}
+NPROC_PER_NODE=${NPROC_PER_NODE:-$SEP_SIZE}
+BACKEND=${BACKEND:-nccl}
+INIT_METHOD=${INIT_METHOD:-env://}
 
 # defaults (base)
 NUM_LAYER=12
@@ -85,6 +89,9 @@ ARGS=(
   --top_k "${TOP_K}"
   --device "${DEVICE}"
   --dtype "${DTYPE}"
+  --backend "${BACKEND}"
+  --init_method "${INIT_METHOD}"
+  --sep_size "${SEP_SIZE}"
   --num_layer "${NUM_LAYER}"
   --num_attention_heads "${NUM_ATTENTION_HEADS}"
   --num_key_value_heads "${NUM_KEY_VALUE_HEADS}"
@@ -116,5 +123,9 @@ else
   ARGS+=(--init_from_scratch)
 fi
 
-echo "Running inference with MODEL_SIZE=${MODEL_SIZE}, DEVICE=${DEVICE}, DTYPE=${DTYPE}"
-python inference.py "${ARGS[@]}"
+echo "Running inference with MODEL_SIZE=${MODEL_SIZE}, DEVICE=${DEVICE}, DTYPE=${DTYPE}, SEP_SIZE=${SEP_SIZE}"
+if [[ "${SEP_SIZE}" -gt 1 ]]; then
+  torchrun --nproc_per_node "${NPROC_PER_NODE}" inference.py "${ARGS[@]}"
+else
+  python inference.py "${ARGS[@]}"
+fi

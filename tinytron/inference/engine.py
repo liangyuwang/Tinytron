@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 from contextlib import nullcontext
 import time
 
 from tinytron.model import GPT
 from tinytron.training.config import ModelConfig
+from tinytron.distributed import parallel_state
 from .sampler import sample_next_token
 
 
@@ -26,6 +28,34 @@ class InferenceEngine:
             self.model.load_state_dict(state_dict)
         self.model.eval()
         self.dtype = dtype
+
+    def _sample_next_token_synced(
+        self,
+        logits: torch.Tensor,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+    ) -> torch.Tensor:
+        if not (dist.is_available() and dist.is_initialized()):
+            return sample_next_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+
+        try:
+            sep_group = parallel_state.get_sep_group()
+            sep_rank = parallel_state.get_sep_rank()
+            sep_world_size = parallel_state.get_sep_world_size()
+            sep_src = parallel_state.get_sep_global_rank(0)
+        except AssertionError:
+            return sample_next_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+
+        if sep_world_size <= 1:
+            return sample_next_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+
+        if sep_rank == 0:
+            next_token = sample_next_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+        else:
+            next_token = torch.empty(logits.size(0), dtype=torch.long, device=logits.device)
+        dist.broadcast(next_token, src=sep_src, group=sep_group)
+        return next_token
 
     @torch.no_grad()
     def generate(
@@ -59,7 +89,12 @@ class InferenceEngine:
             decode_t0 = time.perf_counter()
             for _ in range(max_new_tokens):
                 next_logits = logits[:, -1, :]
-                next_token = sample_next_token(next_logits, temperature=temperature, top_k=top_k, top_p=top_p)
+                next_token = self._sample_next_token_synced(
+                    next_logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                )
                 tokens = torch.cat([tokens, next_token.unsqueeze(-1)], dim=1)
                 decode_steps += 1
 

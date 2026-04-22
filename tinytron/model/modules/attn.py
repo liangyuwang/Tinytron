@@ -83,6 +83,18 @@ def gqa_impl(k: torch.Tensor, v: torch.Tensor, num_key_value_heads: int, num_att
         raise ValueError("num_attention_heads must be divisible by num_key_value_heads")
 
 
+def build_cache_causal_mask(
+    query_len: int,
+    key_len: int,
+    past_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a causal mask for incremental decoding with a KV cache."""
+    query_positions = past_len + torch.arange(query_len, device=device).unsqueeze(-1)
+    key_positions = torch.arange(key_len, device=device).unsqueeze(0)
+    return key_positions <= query_positions
+
+
 class Attention(nn.Module):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
@@ -120,6 +132,16 @@ class Attention(nn.Module):
             torch.manual_seed(base_seed + layer_idx)
             torch.nn.init.normal_(self.c_proj.weight, mean=0.0, std=self.config.init_std)
 
+    def _gather_heads_across_sep(
+        self,
+        y_local: torch.Tensor,
+        sp_group,
+        sp_size: int,
+    ) -> torch.Tensor:
+        gathered = [torch.empty_like(y_local) for _ in range(sp_size)]
+        dist.all_gather(gathered, y_local.contiguous(), group=sp_group)
+        return torch.cat(gathered, dim=1)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -141,20 +163,43 @@ class Attention(nn.Module):
             sp_group = None
             sp_size = 1
             sp_rank = 0
-        if use_cache and sp_size > 1:
-            raise NotImplementedError("KV cache inference currently requires sep_size == 1.")
+        sep_cache_inference = use_cache and sp_size > 1
         q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x) # (B, T, n_embd)
         q = q.view(B, T_local, self.num_attention_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
         k = k.view(B, T_local, self.num_key_value_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
         v = v.view(B, T_local, self.num_key_value_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
-        start_pos = sp_rank * T_local + position_offset
+        start_pos = position_offset if sep_cache_inference else sp_rank * T_local + position_offset
         end_pos = start_pos + T_local
         if self.pos is None or self.pos.size(1) != T_local or self.pos[0, 0] != start_pos:
             self.pos = torch.arange(start_pos, end_pos, device=x.device).unsqueeze(0)
         q, k = rope_impl(q, k, self.pos)
         
         H = self.num_attention_heads
-        if sp_size > 1:
+        if sep_cache_inference:
+            assert H % sp_size == 0, f"Attention heads ({H}) must be divisible by sp_size ({sp_size})"
+            H_local = H // sp_size
+            head_start = sp_rank * H_local
+            head_end = head_start + H_local
+            q_local = q[:, head_start:head_end]
+
+            if self.num_key_value_heads % sp_size == 0:
+                H_kv_local = self.num_key_value_heads // sp_size
+                kv_head_start = sp_rank * H_kv_local
+                kv_head_end = kv_head_start + H_kv_local
+                k_local = k[:, kv_head_start:kv_head_end]
+                v_local = v[:, kv_head_start:kv_head_end]
+                k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
+            else:
+                H_kv_local = H_local
+                k, v = gqa_impl(k, v, self.num_key_value_heads, H)
+                k_local = k[:, head_start:head_end]
+                v_local = v[:, head_start:head_end]
+
+            if past_kv is not None:
+                k_past, v_past = past_kv
+                k_local = torch.cat([k_past, k_local], dim=2)
+                v_local = torch.cat([v_past, v_local], dim=2)
+        elif sp_size > 1:
             # sp all to all
             assert H % sp_size == 0, f"Attention heads ({H}) must be divisible by sp_size ({sp_size})"
             H_local = H // sp_size
@@ -196,12 +241,25 @@ class Attention(nn.Module):
 
         # local attention computation
         dropout_p = self.dropout if self.training else 0.0
+        attn_mask = None
+        is_causal = True
+        if past_kv is not None:
+            past_len = past_kv[0].size(2)
+            attn_mask = build_cache_causal_mask(
+                query_len=q_local.size(2),
+                key_len=k_local.size(2),
+                past_len=past_len,
+                device=q_local.device,
+            )
+            is_causal = False
         y = self.attn_fn(
             q_local, k_local, v_local, 
-            attn_mask=None, dropout_p=dropout_p, is_causal=True
+            attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
         )
 
-        if sp_size > 1:
+        if sep_cache_inference:
+            y = self._gather_heads_across_sep(y, sp_group, sp_size)
+        elif sp_size > 1:
             # sp all to all back
             y = y.view(B, H_local, sp_size, T_local, self.head_dim)
             y = y.permute(2, 0, 1, 3, 4).contiguous()   # [sp, B, H_local, T_local, D]

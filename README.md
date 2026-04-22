@@ -198,11 +198,25 @@ python inference.py \
   --top_k 50
 ```
 
+SEP distributed inference is also supported through `torchrun`:
+
+```bash
+torchrun --nproc_per_node 2 inference.py \
+  --checkpoint_path ./log/your_run/00010_model.pt \
+  --prompt_token_ids 1,2,3,4 \
+  --max_new_tokens 32 \
+  --temperature 1.0 \
+  --top_k 50 \
+  --sep_size 2
+```
+
 Notes:
-- This baseline currently targets `sep_size == 1` for KV-cache inference.
+- For `sep_size > 1`, inference keeps the prompt replicated within each SEP group and shards KV-cache/state by attention head during decode.
+- Sampling is synchronized within each SEP group so all ranks advance with the same next token.
 - Output is printed as comma-separated token ids.
 - `inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.
 - Use `scripts/inference_debug.sh` for a one-command debug launch with model-size presets (`tiny`, `small`, `base`, `large`, `moe-sm`).
+- `SEP_SIZE=<n>` makes the debug script switch to `torchrun --nproc_per_node <n>`.
 - `MODEL_SIZE=moe-sm` can run in single-process inference mode (no `init_process_group`) with EP fallback to 1.
 
 Smoke test without a checkpoint (random initialized weights):
