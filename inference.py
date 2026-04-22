@@ -80,15 +80,18 @@ def main() -> None:
         device=args.device,
         dtype=dtype,
     )
-    output = engine.generate(
+    output, stats = engine.generate(
         prompt,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_k=args.top_k,
         top_p=args.top_p,
         eos_token_id=args.eos_token_id,
+        return_stats=True,
     )
     print(",".join(str(int(x)) for x in output[0].tolist()))
+    print(f"prefill tok/s: {stats['prefill_tokens_per_sec']:.2f}")
+    print(f"decode tok/s: {stats['decode_tokens_per_sec']:.2f}")
 
 
 if __name__ == "__main__":

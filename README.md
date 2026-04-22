@@ -201,6 +201,7 @@ python inference.py \
 Notes:
 - This baseline currently targets `sep_size == 1` for KV-cache inference.
 - Output is printed as comma-separated token ids.
+- `inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.
 
 Smoke test without a checkpoint (random initialized weights):
 

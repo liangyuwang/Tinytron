@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from contextlib import nullcontext
+import time
 
 from tinytron.model import GPT
 from tinytron.training.config import ModelConfig
@@ -35,7 +36,8 @@ class InferenceEngine:
         top_k: int | None = None,
         top_p: float | None = None,
         eos_token_id: int | None = None,
-    ) -> torch.Tensor:
+        return_stats: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         if input_ids.dim() != 2:
             raise ValueError(f"input_ids must be [B, T], got shape={tuple(input_ids.shape)}")
         tokens = input_ids.to(self.device)
@@ -47,11 +49,19 @@ class InferenceEngine:
             else nullcontext()
         )
         with autocast_ctx:
+            prefill_tokens = int(tokens.numel())
+            prefill_t0 = time.perf_counter()
             logits, past_key_values = self.model(tokens, use_cache=True, past_key_values=None, position_offset=0)
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            prefill_t1 = time.perf_counter()
+            decode_steps = 0
+            decode_t0 = time.perf_counter()
             for _ in range(max_new_tokens):
                 next_logits = logits[:, -1, :]
                 next_token = sample_next_token(next_logits, temperature=temperature, top_k=top_k, top_p=top_p)
                 tokens = torch.cat([tokens, next_token.unsqueeze(-1)], dim=1)
+                decode_steps += 1
 
                 if eos_token_id is not None and torch.all(next_token == eos_token_id):
                     break
@@ -63,5 +73,20 @@ class InferenceEngine:
                     past_key_values=past_key_values,
                     position_offset=tokens.size(1) - 1,
                 )
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            decode_t1 = time.perf_counter()
 
-        return tokens
+        if not return_stats:
+            return tokens
+
+        prefill_time = max(prefill_t1 - prefill_t0, 1e-9)
+        decode_time = max(decode_t1 - decode_t0, 1e-9)
+        decode_tokens = int(tokens.size(0) * decode_steps)
+        stats = {
+            "prefill_tokens_per_sec": prefill_tokens / prefill_time,
+            "decode_tokens_per_sec": decode_tokens / decode_time if decode_steps > 0 else 0.0,
+            "prefill_tokens": float(prefill_tokens),
+            "decode_tokens": float(decode_tokens),
+        }
+        return tokens, stats
