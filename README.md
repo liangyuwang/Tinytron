@@ -202,6 +202,16 @@ Notes:
 - This baseline currently targets `sep_size == 1` for KV-cache inference.
 - Output is printed as comma-separated token ids.
 
+Smoke test without a checkpoint (random initialized weights):
+
+```bash
+python inference.py \
+  --init_from_scratch \
+  --prompt_token_ids 1,2,3,4 \
+  --max_new_tokens 8 \
+  --device cuda
+```
+
 ## Configuration
 
 Configuration is built from CLI arguments via `tinytron/training/arguments.py` and assembled into a unified `Config` in `tinytron/training/config.py`.

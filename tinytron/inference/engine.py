@@ -12,7 +12,7 @@ class InferenceEngine:
     def __init__(
         self,
         model_config: ModelConfig,
-        checkpoint_path: str,
+        checkpoint_path: str | None = None,
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
     ):
@@ -20,8 +20,9 @@ class InferenceEngine:
         if self.device.type == "cuda":
             torch.cuda.set_device(self.device)
         self.model = GPT(model_config).to(self.device)
-        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        self.model.load_state_dict(state_dict)
+        if checkpoint_path:
+            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            self.model.load_state_dict(state_dict)
         self.model.eval()
         self.dtype = dtype
 

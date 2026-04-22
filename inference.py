@@ -16,7 +16,8 @@ def parse_prompt_token_ids(prompt: str) -> list[int]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser("tinytron-inference", allow_abbrev=False)
-    parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to *_model.pt checkpoint")
+    parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to *_model.pt checkpoint")
+    parser.add_argument("--init_from_scratch", action="store_true", help="Run inference with random initialized weights")
     parser.add_argument("--prompt_token_ids", type=str, required=True, help="Comma-separated token ids, e.g. '1,2,3'")
     parser.add_argument("--max_new_tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -50,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if not args.init_from_scratch and not args.checkpoint_path:
+        parser.error("Either provide --checkpoint_path, or set --init_from_scratch for random-weight smoke testing.")
 
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
     model_config = ModelConfig(
