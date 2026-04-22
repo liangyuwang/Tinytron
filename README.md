@@ -202,6 +202,7 @@ Notes:
 - This baseline currently targets `sep_size == 1` for KV-cache inference.
 - Output is printed as comma-separated token ids.
 - `inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.
+- Use `scripts/inference_debug.sh` for a one-command debug launch with model-size presets (`tiny`, `small`, `base`, `large`, `moe-sm`).
 
 Smoke test without a checkpoint (random initialized weights):
 
@@ -211,6 +212,17 @@ python inference.py \
   --prompt_token_ids 1,2,3,4 \
   --max_new_tokens 8 \
   --device cuda
+```
+
+Or use the debug script:
+
+```bash
+# Random-weight smoke test
+bash scripts/inference_debug.sh
+
+# Checkpoint run with a preset size
+MODEL_SIZE=small CKPT_PATH=./log/debug_gpt_0.25b/00500_model.pt \
+bash scripts/inference_debug.sh
 ```
 
 ## Configuration
