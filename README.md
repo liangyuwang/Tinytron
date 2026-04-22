@@ -183,6 +183,25 @@ Outputs:
 - Temporary log (auto-cleaned): `autotune_temp.log`
 - Best config printed at the end as `SEP_SIZE=<...>, BATCH_SIZE=<...>`
 
+### 5. Inference Baseline (KV Cache)
+
+The repository includes a minimal inference entrypoint `inference.py` that reuses the same `tinytron/model` code path and supports autoregressive decoding with per-layer KV cache.
+
+Example:
+
+```bash
+python inference.py \
+  --checkpoint_path ./log/your_run/00010_model.pt \
+  --prompt_token_ids 1,2,3,4 \
+  --max_new_tokens 32 \
+  --temperature 1.0 \
+  --top_k 50
+```
+
+Notes:
+- This baseline currently targets `sep_size == 1` for KV-cache inference.
+- Output is printed as comma-separated token ids.
+
 ## Configuration
 
 Configuration is built from CLI arguments via `tinytron/training/arguments.py` and assembled into a unified `Config` in `tinytron/training/config.py`.

@@ -119,16 +119,24 @@ class Attention(nn.Module):
             torch.manual_seed(base_seed + layer_idx)
             torch.nn.init.normal_(self.c_proj.weight, mean=0.0, std=self.config.init_std)
 
-    def forward(self, x: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        use_cache: bool = False,
+        position_offset: int = 0,
+    ):
         B, T_local, C = x.size()
         sp_group = parallel_state.get_sep_group()
         sp_size = parallel_state.get_sep_world_size()
         sp_rank = parallel_state.get_sep_rank()
+        if use_cache and sp_size > 1:
+            raise NotImplementedError("KV cache inference currently requires sep_size == 1.")
         q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x) # (B, T, n_embd)
         q = q.view(B, T_local, self.num_attention_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
         k = k.view(B, T_local, self.num_key_value_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
         v = v.view(B, T_local, self.num_key_value_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
-        start_pos = sp_rank * T_local
+        start_pos = sp_rank * T_local + position_offset
         end_pos = start_pos + T_local
         if self.pos is None or self.pos.size(1) != T_local or self.pos[0, 0] != start_pos:
             self.pos = torch.arange(start_pos, end_pos, device=x.device).unsqueeze(0)
@@ -170,6 +178,10 @@ class Attention(nn.Module):
             H_kv_local = self.num_key_value_heads
             q_local, k_local, v_local = q, k, v
             k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
+            if past_kv is not None:
+                k_past, v_past = past_kv
+                k_local = torch.cat([k_past, k_local], dim=2)
+                v_local = torch.cat([v_past, v_local], dim=2)
 
         # local attention computation
         dropout_p = self.dropout if self.training else 0.0
@@ -189,4 +201,7 @@ class Attention(nn.Module):
         y = y.transpose(-2, -3).reshape(B, T_local, C)
         # output projection
         y = self.c_proj(y)
-        return y
+        if use_cache:
+            new_kv = (k_local, v_local)
+            return y, new_kv
+        return y, None

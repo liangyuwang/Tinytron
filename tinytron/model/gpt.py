@@ -30,11 +30,19 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config)
         self.mlp = MoE(config, layer_idx, top_k) if use_moe else MLP(config, layer_idx)
 
-    def forward(self, x: torch.Tensor):
-        x = x + self.attn(self.ln_1(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        use_cache: bool = False,
+        position_offset: int = 0,
+    ):
+        attn_out, new_kv = self.attn(self.ln_1(x), past_kv=past_kv, use_cache=use_cache, position_offset=position_offset)
+        x = x + attn_out
         mlp_out = self.mlp(self.ln_2(x))
         x = x + mlp_out[0] if self.use_moe else x + mlp_out
-        return (x, mlp_out[1]) if self.use_moe else (x, None)
+        gate_logits = mlp_out[1] if self.use_moe else None
+        return x, gate_logits, new_kv
 
 # GPT-like Model
 
@@ -65,22 +73,34 @@ class GPT(nn.Module):
                 torch.manual_seed(base_seed)
                 torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=self.config.init_std)
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None):
+    def forward(
+        self,
+        idx: torch.Tensor,
+        targets: torch.Tensor = None,
+        past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        use_cache: bool = False,
+        position_offset: int = 0,
+    ):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         x = self.wte(idx) # token embeddings of shape (B, T, n_embd)
         total_aux_loss = 0.0
-        for block in self.blocks:
-            x, gate_logits = block(x)
+        new_past_key_values = [] if use_cache else None
+        for layer_idx, block in enumerate(self.blocks):
+            layer_past = past_key_values[layer_idx] if past_key_values is not None else None
+            x, gate_logits, new_kv = block(x, past_kv=layer_past, use_cache=use_cache, position_offset=position_offset)
             if gate_logits is not None:
                 total_aux_loss += self.expert_loss_fn(gate_logits)
+            if use_cache:
+                new_past_key_values.append(new_kv)
         x = self.lnf(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
         if targets is not None:
             loss, logging_loss = self.loss_fn(logits, targets)
             return logits, loss + total_aux_loss, logging_loss
-        else:
-            return logits
+        if use_cache:
+            return logits, new_past_key_values
+        return logits
     
     def get_flops_per_fwd_bwd(self, batch_size, seq_len):
         """
