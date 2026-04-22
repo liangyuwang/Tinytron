@@ -203,6 +203,7 @@ Notes:
 - Output is printed as comma-separated token ids.
 - `inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.
 - Use `scripts/inference_debug.sh` for a one-command debug launch with model-size presets (`tiny`, `small`, `base`, `large`, `moe-sm`).
+- `MODEL_SIZE=moe-sm` can run in single-process inference mode (no `init_process_group`) with EP fallback to 1.
 
 Smoke test without a checkpoint (random initialized weights):
 
