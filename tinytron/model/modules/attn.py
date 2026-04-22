@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from tinytron.training.config import ModelConfig
 from tinytron.distributed import (
@@ -127,9 +128,19 @@ class Attention(nn.Module):
         position_offset: int = 0,
     ):
         B, T_local, C = x.size()
-        sp_group = parallel_state.get_sep_group()
-        sp_size = parallel_state.get_sep_world_size()
-        sp_rank = parallel_state.get_sep_rank()
+        if dist.is_available() and dist.is_initialized():
+            try:
+                sp_group = parallel_state.get_sep_group()
+                sp_size = parallel_state.get_sep_world_size()
+                sp_rank = parallel_state.get_sep_rank()
+            except AssertionError:
+                sp_group = None
+                sp_size = 1
+                sp_rank = 0
+        else:
+            sp_group = None
+            sp_size = 1
+            sp_rank = 0
         if use_cache and sp_size > 1:
             raise NotImplementedError("KV cache inference currently requires sep_size == 1.")
         q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x) # (B, T, n_embd)
