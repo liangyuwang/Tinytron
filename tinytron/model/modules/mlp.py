@@ -37,7 +37,7 @@ class MLP(nn.Module):
             torch.manual_seed(base_seed + layer_idx)
             torch.nn.init.normal_(self.down_proj.weight, mean=0.0, std=self.config.init_std)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, use_cache: bool = False) -> torch.Tensor:
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -104,25 +104,117 @@ class MoE(nn.Module):
         with torch.random.fork_rng(devices=[self.router.weight.device]):
             torch.manual_seed(base_seed + layer_idx)
             nn.init.normal_(self.router.weight, mean=0.0, std=self.config.init_std)
+
+    def _apply_local_experts(
+        self,
+        received_x: torch.Tensor,
+        received_experts: torch.Tensor,
+    ) -> torch.Tensor:
+        if received_experts.numel() == 0:
+            return received_x.new_empty((0, self.hidden_size))
+
+        local_expert_indices = received_experts % self.num_local_experts
+        local_sort_idx = torch.argsort(local_expert_indices)
+        local_x = received_x[local_sort_idx].contiguous()
+        local_expert_indices = local_expert_indices[local_sort_idx]
+        counts = torch.bincount(local_expert_indices, minlength=self.num_local_experts)
+        offs = torch.cumsum(counts, dim=0).to(torch.int32)
+        if self.grouped_gemm_supported:
+            gate_out = F.grouped_mm(local_x, self.experts_gate_weights, offs=offs)
+            up_out = F.grouped_mm(local_x, self.experts_up_weights, offs=offs)
+            act_out = self.experts_act_fn(gate_out) * up_out
+            down_out = F.grouped_mm(act_out, self.experts_down_weights, offs=offs)
+        else:   # slow
+            max_tokens = counts.max().item()
+            if max_tokens == 0:
+                padded_x = local_x.view(self.num_local_experts, 0, self.hidden_size)
+                gate_out_padded = torch.bmm(padded_x, self.experts_gate_weights.transpose(1, 2))
+                up_out_padded = torch.bmm(padded_x, self.experts_up_weights.transpose(1, 2))
+                act_out_padded = self.experts_act_fn(gate_out_padded) * up_out_padded
+                down_out_padded = torch.bmm(act_out_padded, self.experts_down_weights.transpose(1, 2))
+                down_out = down_out_padded.view(0, self.hidden_size)
+            else:
+                starts = torch.zeros_like(offs)
+                starts[1:] = offs[:-1]
+                relative_idx = torch.arange(len(local_x), device=local_x.device) - starts[local_expert_indices]
+                padded_x = torch.zeros(
+                    self.num_local_experts, max_tokens, self.hidden_size, 
+                    dtype=local_x.dtype, device=local_x.device
+                )
+                padded_x = padded_x.index_put((local_expert_indices, relative_idx), local_x)
+                
+                gate_out_padded = torch.bmm(padded_x, self.experts_gate_weights.transpose(1, 2))
+                up_out_padded = torch.bmm(padded_x, self.experts_up_weights.transpose(1, 2))
+                act_out_padded = self.experts_act_fn(gate_out_padded) * up_out_padded
+                down_out_padded = torch.bmm(act_out_padded, self.experts_down_weights.transpose(1, 2))
+                down_out = down_out_padded[local_expert_indices, relative_idx]
+
+        rev_local_sort_idx = torch.argsort(local_sort_idx)
+        return down_out[rev_local_sort_idx].contiguous()
+
+    def _forward_sep_local_reduce_inference(
+        self,
+        x: torch.Tensor,
+        flat_x: torch.Tensor,
+        selected_experts: torch.Tensor,
+        weights: torch.Tensor,
+        ep_group,
+        ep_rank: int,
+    ) -> torch.Tensor:
+        """
+        During SEP-only inference, every rank in the EP/SEP group sees the same tokens.
+        Each rank computes only its local-expert contribution, then all-reduces the
+        per-token partial output across the group.
+        """
+        B, T, D = x.size()
+        target_ep_ranks = selected_experts // self.num_local_experts
+        local_mask = target_ep_ranks == ep_rank
+
+        partial_flat = flat_x.new_zeros((flat_x.size(0), D))
+        if local_mask.any():
+            local_indices = torch.nonzero(local_mask, as_tuple=False).squeeze(-1)
+            local_x = flat_x[local_indices].contiguous()
+            local_experts = selected_experts[local_indices].contiguous()
+            local_out = self._apply_local_experts(local_x, local_experts)
+            partial_flat = partial_flat.index_put((local_indices,), local_out)
+
+        partial_flat = partial_flat * weights.unsqueeze(-1)
+        final_x = partial_flat.view(B * T, self.top_k, D).sum(dim=1).reshape(B, T, D)
+        dist.all_reduce(final_x, op=dist.ReduceOp.SUM, group=ep_group)
+        return final_x
     
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, use_cache: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         B, T, D = x.size()
         if dist.is_available() and dist.is_initialized():
             try:
                 ep_group = parallel_state.get_ep_group()
                 ep_world_size = parallel_state.get_ep_world_size()
+                ep_rank = parallel_state.get_ep_rank()
             except AssertionError:
                 ep_group = None
                 ep_world_size = 1
+                ep_rank = 0
         else:
             ep_group = None
             ep_world_size = 1
+            ep_rank = 0
         # router_logits: (batch * N, n_experts)
         gate_logits = self.router(x) # [B, T, total_experts]
         weights, selected_experts = torch.topk(gate_logits, self.top_k, dim=-1)
         weights = F.softmax(weights, dim=-1).view(-1)      # [B * T * top_k]
         selected_experts = selected_experts.view(-1)       # [B * T * top_k]
         flat_x = x.view(-1, D).repeat_interleave(self.top_k, dim=0)
+
+        if use_cache and ep_world_size > 1:
+            final_x = self._forward_sep_local_reduce_inference(
+                x=x,
+                flat_x=flat_x,
+                selected_experts=selected_experts,
+                weights=weights,
+                ep_group=ep_group,
+                ep_rank=ep_rank,
+            )
+            return final_x, gate_logits
 
         if ep_world_size > 1:
             target_ep_ranks = selected_experts // self.num_local_experts
@@ -143,46 +235,7 @@ class MoE(nn.Module):
             received_x = flat_x
             received_experts = selected_experts
 
-        local_expert_indices = received_experts % self.num_local_experts
-        local_sort_idx = torch.argsort(local_expert_indices)
-        local_x = received_x[local_sort_idx].contiguous()
-        local_expert_indices = local_expert_indices[local_sort_idx]
-        counts = torch.bincount(local_expert_indices, minlength=self.num_local_experts)
-        offs = torch.cumsum(counts, dim=0).to(torch.int32)
-        if self.grouped_gemm_supported:
-            gate_out = F.grouped_mm(local_x, self.experts_gate_weights, offs=offs)
-            up_out = F.grouped_mm(local_x, self.experts_up_weights, offs=offs)
-            act_out = self.experts_act_fn(gate_out) * up_out
-            down_out = F.grouped_mm(act_out, self.experts_down_weights, offs=offs)
-        else:   # slow
-            max_tokens = counts.max().item()
-            if max_tokens == 0:
-                # down_out = torch.empty_like(local_x)  # will break autograd graph, change to the following code
-                padded_x = local_x.view(self.num_local_experts, 0, self.hidden_size)
-                gate_out_padded = torch.bmm(padded_x, self.experts_gate_weights.transpose(1, 2))
-                up_out_padded = torch.bmm(padded_x, self.experts_up_weights.transpose(1, 2))
-                act_out_padded = self.experts_act_fn(gate_out_padded) * up_out_padded
-                down_out_padded = torch.bmm(act_out_padded, self.experts_down_weights.transpose(1, 2))
-                down_out = down_out_padded.view(0, self.hidden_size)
-            else:
-                starts = torch.zeros_like(offs)
-                starts[1:] = offs[:-1]
-                relative_idx = torch.arange(len(local_x), device=local_x.device) - starts[local_expert_indices]
-                padded_x = torch.zeros(
-                    self.num_local_experts, max_tokens, self.hidden_size, 
-                    dtype=local_x.dtype, device=local_x.device
-                )
-                # padded_x[local_expert_indices, relative_idx] = local_x    # # will break autograd graph, change to the following code
-                padded_x = padded_x.index_put((local_expert_indices, relative_idx), local_x)
-                
-                gate_out_padded = torch.bmm(padded_x, self.experts_gate_weights.transpose(1, 2))
-                up_out_padded = torch.bmm(padded_x, self.experts_up_weights.transpose(1, 2))
-                act_out_padded = self.experts_act_fn(gate_out_padded) * up_out_padded
-                down_out_padded = torch.bmm(act_out_padded, self.experts_down_weights.transpose(1, 2))
-                down_out = down_out_padded[local_expert_indices, relative_idx]
-
-        rev_local_sort_idx = torch.argsort(local_sort_idx)
-        out_x = down_out[rev_local_sort_idx].contiguous()
+        out_x = self._apply_local_experts(received_x, received_experts)
         if ep_world_size > 1:
             combined_x = ep_all_to_all(out_x, recv_splits, send_splits, ep_group)
             rev_global_sort_idx = torch.argsort(global_sort_idx)

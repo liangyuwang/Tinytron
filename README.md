@@ -212,6 +212,7 @@ torchrun --nproc_per_node 2 inference.py \
 
 Notes:
 - For `sep_size > 1`, inference keeps the prompt replicated within each SEP group and shards KV-cache/state by attention head during decode.
+- For `use_moe` with `sep_size > 1`, SEP inference keeps routing local on each rank, computes only local-expert contributions, and merges the replicated MoE outputs with an EP/SEP `all_reduce`.
 - Sampling is synchronized within each SEP group so all ranks advance with the same next token.
 - Output is printed as comma-separated token ids.
 - `inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.

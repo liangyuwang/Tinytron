@@ -39,7 +39,7 @@ class Block(nn.Module):
     ):
         attn_out, new_kv = self.attn(self.ln_1(x), past_kv=past_kv, use_cache=use_cache, position_offset=position_offset)
         x = x + attn_out
-        mlp_out = self.mlp(self.ln_2(x))
+        mlp_out = self.mlp(self.ln_2(x), use_cache=use_cache)
         x = x + mlp_out[0] if self.use_moe else x + mlp_out
         gate_logits = mlp_out[1] if self.use_moe else None
         return x, gate_logits, new_kv
