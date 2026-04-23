@@ -1,64 +1,20 @@
 from __future__ import annotations
 
-import argparse
 import os
 import torch
 import torch.distributed as dist
 
 from tinytron.training.config import ModelConfig, ParallelConfig
 from tinytron.inference import InferenceEngine
+from tinytron.inference.arguments import build_parser, parse_prompt_token_ids
 from tinytron.distributed import parallel_state
-
-
-def parse_prompt_token_ids(prompt: str) -> list[int]:
-    values = [p.strip() for p in prompt.split(",") if p.strip()]
-    if not values:
-        raise ValueError("--prompt_token_ids must contain at least one token id")
-    return [int(v) for v in values]
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser("tinytron-inference", allow_abbrev=False)
-    parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to *_model.pt checkpoint")
-    parser.add_argument("--init_from_scratch", action="store_true", help="Run inference with random initialized weights")
-    parser.add_argument("--prompt_token_ids", type=str, required=True, help="Comma-separated token ids, e.g. '1,2,3'")
-    parser.add_argument("--max_new_tokens", type=int, default=64)
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top_k", type=int, default=None)
-    parser.add_argument("--top_p", type=float, default=None)
-    parser.add_argument("--eos_token_id", type=int, default=None)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp32"])
-    parser.add_argument("--backend", type=str, default="nccl")
-    parser.add_argument("--init_method", type=str, default="env://")
-    parser.add_argument("--sep_size", type=int, default=1, help="SEP size for distributed KV-cache inference")
-
-    # model shape args (keep same names as ModelConfig)
-    parser.add_argument("--seed", type=int, default=1337)
-    parser.add_argument("--block_size", type=int, default=4096)
-    parser.add_argument("--vocab_size", type=int, default=50304)
-    parser.add_argument("--num_layer", type=int, default=32)
-    parser.add_argument("--num_attention_heads", type=int, default=128)
-    parser.add_argument("--num_key_value_heads", type=int, default=8)
-    parser.add_argument("--hidden_size", type=int, default=1024)
-    parser.add_argument("--intermediate_size", type=int, default=4096)
-    parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--init_std", type=float, default=0.013)
-    parser.add_argument("--tied_lm_head", action=argparse.BooleanOptionalAction, default=True)
-
-    # MoE
-    parser.add_argument("--use_moe", action="store_true")
-    parser.add_argument("--num_experts", type=int, default=128)
-    parser.add_argument("--num_experts_per_tok", type=int, default=8)
-    parser.add_argument("--moe_intermediate_size", type=int, default=256)
-    return parser
 
 
 def is_distributed_launch() -> bool:
     return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
 
-def initialize_distributed_inference(args: argparse.Namespace) -> tuple[str, bool]:
+def initialize_distributed_inference(args) -> tuple[str, bool]:
     if not is_distributed_launch():
         return args.device, True
 
