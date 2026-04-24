@@ -50,25 +50,16 @@ def destroy_distributed_inference() -> None:
         dist.destroy_process_group()
 
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-    if not args.init_from_scratch and not args.checkpoint_path:
-        parser.error("Either provide --checkpoint_path, or set --init_from_scratch for random-weight smoke testing.")
-    if is_distributed_launch() and args.sep_size <= 1:
-        parser.error("Distributed inference requires --sep_size > 1 to initialize SEP process groups.")
-    if is_distributed_launch():
-        if args.num_attention_heads % args.sep_size != 0:
-            parser.error("Distributed qkv-sharded inference requires --num_attention_heads to be divisible by --sep_size.")
-        if args.num_key_value_heads % args.sep_size != 0:
-            parser.error("Distributed qkv-sharded inference requires --num_key_value_heads to be divisible by --sep_size.")
+def load_model_config_from_checkpoint(args) -> ModelConfig:
+    model_cfg_dict = None
+    if args.checkpoint_path:
+        meta_path = args.checkpoint_path.replace("_model.pt", "_meta.pt")
+        if os.path.exists(meta_path):
+            meta = torch.load(meta_path, map_location="cpu")
+            model_cfg_dict = meta.get("config", {}).get("model")
 
-    device = args.device
-    master_process = True
-    try:
-        device, master_process = initialize_distributed_inference(args)
-        dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
-        model_config = ModelConfig(
+    if model_cfg_dict is None:
+        model_cfg = ModelConfig(
             seed=args.seed,
             block_size=args.block_size,
             vocab_size=args.vocab_size,
@@ -84,9 +75,27 @@ def main() -> None:
             num_experts=args.num_experts,
             num_experts_per_tok=args.num_experts_per_tok,
             moe_intermediate_size=args.moe_intermediate_size,
-            inference_shard_qkv=is_distributed_launch(),
         )
+    else:
+        model_cfg = ModelConfig(**model_cfg_dict)
 
+    return model_cfg
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    if not args.init_from_scratch and not args.checkpoint_path:
+        parser.error("Either provide --checkpoint_path, or set --init_from_scratch for random-weight smoke testing.")
+    model_config = load_model_config_from_checkpoint(args)
+    if is_distributed_launch() and args.sep_size <= 1:
+        parser.error("Distributed inference requires --sep_size > 1 to initialize SEP process groups.")
+
+    device = args.device
+    master_process = True
+    try:
+        device, master_process = initialize_distributed_inference(args)
+        dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
         prompt = torch.tensor([parse_prompt_token_ids(args.prompt_token_ids)], dtype=torch.long)
         engine = InferenceEngine(
             model_config=model_config,

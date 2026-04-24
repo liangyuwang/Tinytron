@@ -72,7 +72,7 @@ def _add_data_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     g.add_argument("--use_mock_data", action="store_true")
     g.add_argument("--mock_data_num_samples", type=int, default=1280)
     g.add_argument("--num_workers", type=int, default=0)
-    g.add_argument("--pin_memory", action="store_true")
+    g.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
 def _add_optim_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -106,10 +106,10 @@ def _add_parallel_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     g = parser.add_argument_group("distributed")
     g.add_argument("--backend", type=str, default="nccl")
     g.add_argument("--init_method", type=str, default="env://")
-    g.add_argument("--sep_size", type=int, default=8, help="SEP size (SP/EP joint parallel group size)")
+    g.add_argument("--sep_size", type=int, default=1, help="SEP size (SP/EP joint parallel group size)")
     g.add_argument("--ddp_find_unused_parameters", action="store_true")
-    g.add_argument("--ddp_gradient_as_bucket_view", action="store_true")
-    g.add_argument("--use_distributed_optimizer", action="store_true", help="enable ZeRO-1 style optimizer sharding (DistributedOptimizer)")
+    g.add_argument("--ddp_gradient_as_bucket_view", action=argparse.BooleanOptionalAction, default=True)
+    g.add_argument("--use_distributed_optimizer", action=argparse.BooleanOptionalAction, default=True, help="enable ZeRO-1 style optimizer sharding (DistributedOptimizer)")
     return parser
 
 
@@ -125,7 +125,7 @@ def _add_model_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     g.add_argument("--intermediate_size", type=int, default=4096)
     g.add_argument("--dropout", type=float, default=0.0)
     g.add_argument("--init_std", type=float, default=0.013)
-    g.add_argument("--tied_lm_head", action="store_true")
+    g.add_argument("--tied_lm_head", action=argparse.BooleanOptionalAction, default=True)
 
     # MoE
     g.add_argument("--use_moe", action="store_true")
@@ -133,4 +133,3 @@ def _add_model_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     g.add_argument("--num_experts_per_tok", type=int, default=8)
     g.add_argument("--moe_intermediate_size", type=int, default=256)
     return parser
-
