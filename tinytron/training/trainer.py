@@ -254,10 +254,10 @@ class Trainer:
         if precision == "fp32":
             return nullcontext()
         raise ValueError(f"Unsupported precision: {precision}. Supported precisions are: bf16, fp32.")
-        
-    def _one_training_micro_step(self, config: Config, micro_step: int, data_batch: dict):
+
+    def _prepare_local_batch(self, data_batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
         x, y = data_batch["input_ids"], data_batch["labels"]
-        B, T = x.shape
+        _, T = x.shape
         assert T % self.sp_world_size == 0, "sequence length must be divisible by sp_world_size"
         seq_chunk_size = T // self.sp_world_size
         seq_start_idx = self.sp_rank * seq_chunk_size
@@ -266,6 +266,10 @@ class Trainer:
         y = y[:, seq_start_idx:seq_end_idx]
         x = x.to(f'cuda:{self.local_rank}')
         y = y.to(f'cuda:{self.local_rank}')
+        return x, y
+        
+    def _one_training_micro_step(self, config: Config, micro_step: int, data_batch: dict):
+        x, y = self._prepare_local_batch(data_batch)
         with self.profiler_record_fn("forward"):
             with self._autocast_context(config.train.precision):
                 _, loss, logging_loss = self.model(x.reshape(x.shape[0],-1), y.reshape(y.shape[0],-1))
@@ -410,16 +414,7 @@ class Trainer:
             val_loss_accum = 0.0
             val_loss_steps = len(self.val_loader)
             for batch in tqdm(self.val_loader, desc="Val", disable=not self.master_process):
-                x, y = batch["input_ids"], batch["labels"]
-                B, T = x.shape
-                assert T % self.sp_world_size == 0, "sequence length must be divisible by sp_world_size"
-                seq_chunk_size = T // self.sp_world_size
-                seq_start_idx = self.sp_rank * seq_chunk_size
-                seq_end_idx = (self.sp_rank + 1) * seq_chunk_size
-                x = x[:, seq_start_idx:seq_end_idx]
-                y = y[:, seq_start_idx:seq_end_idx]
-                x = x.to(f'cuda:{self.local_rank}')
-                y = y.to(f'cuda:{self.local_rank}')
+                x, y = self._prepare_local_batch(batch)
                 with self._autocast_context(self.config.train.precision):
                     logits, _, logging_loss = self.model(x.reshape(x.shape[0],-1), y.reshape(y.shape[0],-1))
                 loss = logging_loss / val_loss_steps
