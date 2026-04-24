@@ -25,9 +25,49 @@ class InferenceEngine:
         self.model = GPT(model_config).to(self.device)
         if checkpoint_path:
             state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            if model_config.inference_shard_qkv:
+                state_dict = self._slice_qkv_state_dict_for_local_sep_rank(state_dict, model_config)
             self.model.load_state_dict(state_dict)
         self.model.eval()
         self.dtype = dtype
+
+    def _slice_qkv_state_dict_for_local_sep_rank(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        model_config: ModelConfig,
+    ) -> dict[str, torch.Tensor]:
+        try:
+            sep_rank = parallel_state.get_sep_rank()
+            sep_size = parallel_state.get_sep_world_size()
+        except AssertionError:
+            return state_dict
+
+        if sep_size <= 1:
+            return state_dict
+
+        head_dim = model_config.hidden_size // model_config.num_attention_heads
+        q_total_out = model_config.num_attention_heads * head_dim
+        kv_total_out = model_config.num_key_value_heads * head_dim
+        q_out_per_rank = q_total_out // sep_size
+        kv_out_per_rank = kv_total_out // sep_size
+
+        sliced_state_dict = dict(state_dict)
+        for layer_idx in range(model_config.num_layer):
+            q_key = f"blocks.{layer_idx}.attn.q_proj.weight"
+            k_key = f"blocks.{layer_idx}.attn.k_proj.weight"
+            v_key = f"blocks.{layer_idx}.attn.v_proj.weight"
+
+            for key, shard_width in ((q_key, q_out_per_rank), (k_key, kv_out_per_rank), (v_key, kv_out_per_rank)):
+                weight = sliced_state_dict[key]
+                if weight.size(0) == shard_width:
+                    continue
+                if weight.size(0) not in (q_total_out, kv_total_out):
+                    raise ValueError(f"Unexpected checkpoint shape for {key}: {tuple(weight.shape)}")
+                start = sep_rank * shard_width
+                end = start + shard_width
+                sliced_state_dict[key] = weight[start:end, :].contiguous()
+
+        return sliced_state_dict
 
     def _sample_next_token_synced(
         self,

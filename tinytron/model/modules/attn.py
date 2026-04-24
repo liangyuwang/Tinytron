@@ -106,14 +106,35 @@ class Attention(nn.Module):
         self.num_attention_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
+        self.inference_shard_qkv = bool(config.inference_shard_qkv)
         self.n_embd = config.hidden_size
         self.dropout = config.dropout
         self.pos = None
         self.attn_fn = F.scaled_dot_product_attention
+        self.q_proj_heads = self.num_attention_heads
+        self.kv_proj_heads = self.num_key_value_heads
+        if self.inference_shard_qkv:
+            try:
+                sp_size = parallel_state.get_sep_world_size()
+            except AssertionError:
+                sp_size = 1
+            if sp_size > 1:
+                if self.num_attention_heads % sp_size != 0:
+                    raise ValueError(
+                        f"num_attention_heads ({self.num_attention_heads}) must be divisible by sep_size ({sp_size}) "
+                        "for inference_shard_qkv."
+                    )
+                if self.num_key_value_heads % sp_size != 0:
+                    raise ValueError(
+                        f"num_key_value_heads ({self.num_key_value_heads}) must be divisible by sep_size ({sp_size}) "
+                        "for inference_shard_qkv."
+                    )
+                self.q_proj_heads = self.num_attention_heads // sp_size
+                self.kv_proj_heads = self.num_key_value_heads // sp_size
         # key, query, value projections for all heads, but in a batch        
-        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False, device=self.device)
-        self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False, device=self.device)
-        self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False, device=self.device)
+        self.q_proj = nn.Linear(config.hidden_size, self.q_proj_heads * self.head_dim, bias=False, device=self.device)
+        self.k_proj = nn.Linear(config.hidden_size, self.kv_proj_heads * self.head_dim, bias=False, device=self.device)
+        self.v_proj = nn.Linear(config.hidden_size, self.kv_proj_heads * self.head_dim, bias=False, device=self.device)
         # output projection
         self.c_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False, device=self.device)
         self._init_weights(config.seed, layer_idx)
@@ -165,9 +186,9 @@ class Attention(nn.Module):
             sp_rank = 0
         sep_cache_inference = use_cache and sp_size > 1
         q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x) # (B, T, n_embd)
-        q = q.view(B, T_local, self.num_attention_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
-        k = k.view(B, T_local, self.num_key_value_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
-        v = v.view(B, T_local, self.num_key_value_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
+        q = q.view(B, T_local, self.q_proj_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
+        k = k.view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
+        v = v.view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
         start_pos = position_offset if sep_cache_inference else sp_rank * T_local + position_offset
         end_pos = start_pos + T_local
         if self.pos is None or self.pos.size(1) != T_local or self.pos[0, 0] != start_pos:
@@ -175,7 +196,18 @@ class Attention(nn.Module):
         q, k = rope_impl(q, k, self.pos)
         
         H = self.num_attention_heads
-        if sep_cache_inference:
+        if sep_cache_inference and self.inference_shard_qkv:
+            H_local = self.q_proj_heads
+            H_kv_local = self.kv_proj_heads
+            q_local = q
+            k_local = k
+            v_local = v
+            k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
+            if past_kv is not None:
+                k_past, v_past = past_kv
+                k_local = torch.cat([k_past, k_local], dim=2)
+                v_local = torch.cat([v_past, v_local], dim=2)
+        elif sep_cache_inference:
             assert H % sp_size == 0, f"Attention heads ({H}) must be divisible by sp_size ({sp_size})"
             H_local = H // sp_size
             head_start = sp_rank * H_local

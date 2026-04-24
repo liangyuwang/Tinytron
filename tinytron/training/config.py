@@ -127,6 +127,9 @@ class ModelConfig:
     num_experts_per_tok: int = 8
     moe_intermediate_size: int = 256
 
+    # Inference-only optimization: shard q/k/v projections by SEP head shard.
+    inference_shard_qkv: bool = False
+
 
 def build_config(args: argparse.Namespace) -> Config:
     logging_cfg = LoggingConfig(

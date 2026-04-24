@@ -57,6 +57,11 @@ def main() -> None:
         parser.error("Either provide --checkpoint_path, or set --init_from_scratch for random-weight smoke testing.")
     if is_distributed_launch() and args.sep_size <= 1:
         parser.error("Distributed inference requires --sep_size > 1 to initialize SEP process groups.")
+    if is_distributed_launch():
+        if args.num_attention_heads % args.sep_size != 0:
+            parser.error("Distributed qkv-sharded inference requires --num_attention_heads to be divisible by --sep_size.")
+        if args.num_key_value_heads % args.sep_size != 0:
+            parser.error("Distributed qkv-sharded inference requires --num_key_value_heads to be divisible by --sep_size.")
 
     device = args.device
     master_process = True
@@ -79,6 +84,7 @@ def main() -> None:
             num_experts=args.num_experts,
             num_experts_per_tok=args.num_experts_per_tok,
             moe_intermediate_size=args.moe_intermediate_size,
+            inference_shard_qkv=is_distributed_launch(),
         )
 
         prompt = torch.tensor([parse_prompt_token_ids(args.prompt_token_ids)], dtype=torch.long)
