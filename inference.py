@@ -87,6 +87,8 @@ def main() -> None:
             checkpoint_path=args.checkpoint_path,
             device=device,
             dtype=dtype,
+            use_paged_kv_cache=args.paged_kv_cache,
+            kv_cache_page_size=args.kv_cache_page_size,
         )
         output, stats = engine.generate(
             prompt,

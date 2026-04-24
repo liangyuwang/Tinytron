@@ -95,6 +95,10 @@ def build_cache_causal_mask(
     return key_positions <= query_positions
 
 
+def _is_paged_kv_cache(past_kv) -> bool:
+    return hasattr(past_kv, "append") and hasattr(past_kv, "get_kv") and hasattr(past_kv, "current_length")
+
+
 class Attention(nn.Module):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
@@ -203,7 +207,7 @@ class Attention(nn.Module):
             k_local = k
             v_local = v
             k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
-            if past_kv is not None:
+            if past_kv is not None and not _is_paged_kv_cache(past_kv):
                 k_past, v_past = past_kv
                 k_local = torch.cat([k_past, k_local], dim=2)
                 v_local = torch.cat([v_past, v_local], dim=2)
@@ -227,7 +231,7 @@ class Attention(nn.Module):
                 k_local = k[:, head_start:head_end]
                 v_local = v[:, head_start:head_end]
 
-            if past_kv is not None:
+            if past_kv is not None and not _is_paged_kv_cache(past_kv):
                 k_past, v_past = past_kv
                 k_local = torch.cat([k_past, k_local], dim=2)
                 v_local = torch.cat([v_past, v_local], dim=2)
@@ -266,7 +270,7 @@ class Attention(nn.Module):
             H_kv_local = self.num_key_value_heads
             q_local, k_local, v_local = q, k, v
             k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
-            if past_kv is not None:
+            if past_kv is not None and not _is_paged_kv_cache(past_kv):
                 k_past, v_past = past_kv
                 k_local = torch.cat([k_past, k_local], dim=2)
                 v_local = torch.cat([v_past, v_local], dim=2)
@@ -275,8 +279,21 @@ class Attention(nn.Module):
         dropout_p = self.dropout if self.training else 0.0
         attn_mask = None
         is_causal = True
-        if past_kv is not None:
+        if _is_paged_kv_cache(past_kv):
+            past_len = past_kv.append(k_local, v_local)
+            k_local, v_local = past_kv.get_kv()
+        elif past_kv is not None:
             past_len = past_kv[0].size(2)
+            attn_mask = build_cache_causal_mask(
+                query_len=q_local.size(2),
+                key_len=k_local.size(2),
+                past_len=past_len,
+                device=q_local.device,
+            )
+            is_causal = False
+        else:
+            past_len = 0
+        if past_len > 0 and attn_mask is None:
             attn_mask = build_cache_causal_mask(
                 query_len=q_local.size(2),
                 key_len=k_local.size(2),
@@ -303,6 +320,6 @@ class Attention(nn.Module):
         # output projection
         y = self.c_proj(y)
         if use_cache:
-            new_kv = (k_local, v_local)
+            new_kv = past_kv if _is_paged_kv_cache(past_kv) else (k_local, v_local)
             return y, new_kv
         return y, None

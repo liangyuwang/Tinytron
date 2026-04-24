@@ -8,6 +8,7 @@ import time
 from tinytron.model import GPT
 from tinytron.model.config import ModelConfig
 from tinytron.distributed import parallel_state
+from .cache import PagedKVCache
 from .sampler import sample_next_token
 
 
@@ -18,10 +19,15 @@ class InferenceEngine:
         checkpoint_path: str | None = None,
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
+        use_paged_kv_cache: bool = True,
+        kv_cache_page_size: int = 128,
     ):
         self.device = torch.device(device)
         if self.device.type == "cuda":
             torch.cuda.set_device(self.device)
+        self.model_config = model_config
+        self.use_paged_kv_cache = use_paged_kv_cache
+        self.kv_cache_page_size = kv_cache_page_size
         self.model = GPT(model_config).to(self.device)
         if checkpoint_path:
             state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -110,8 +116,27 @@ class InferenceEngine:
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         if input_ids.dim() != 2:
             raise ValueError(f"input_ids must be [B, T], got shape={tuple(input_ids.shape)}")
-        tokens = input_ids.to(self.device)
-        past_key_values = None
+        prompt = input_ids.to(self.device)
+        batch_size, prompt_len = prompt.shape
+        total_len = prompt_len + max_new_tokens
+        if total_len > self.model_config.block_size:
+            raise ValueError(
+                f"Requested total sequence length {total_len} exceeds block_size {self.model_config.block_size}"
+            )
+        tokens = torch.empty(batch_size, total_len, dtype=prompt.dtype, device=self.device)
+        tokens[:, :prompt_len] = prompt
+        current_length = prompt_len
+        past_key_values = (
+            PagedKVCache.from_model_config(
+                self.model_config,
+                batch_size=batch_size,
+                page_size=self.kv_cache_page_size,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            if self.use_paged_kv_cache
+            else None
+        )
 
         autocast_ctx = (
             torch.autocast(device_type=self.device.type, dtype=self.dtype)
@@ -119,9 +144,9 @@ class InferenceEngine:
             else nullcontext()
         )
         with autocast_ctx:
-            prefill_tokens = int(tokens.numel())
+            prefill_tokens = int(prompt.numel())
             prefill_t0 = time.perf_counter()
-            logits, past_key_values = self.model(tokens, use_cache=True, past_key_values=None, position_offset=0)
+            logits, past_key_values = self.model(prompt, use_cache=True, past_key_values=past_key_values, position_offset=0)
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
             prefill_t1 = time.perf_counter()
@@ -135,7 +160,8 @@ class InferenceEngine:
                     top_k=top_k,
                     top_p=top_p,
                 )
-                tokens = torch.cat([tokens, next_token.unsqueeze(-1)], dim=1)
+                tokens[:, current_length] = next_token
+                current_length += 1
                 decode_steps += 1
 
                 if eos_token_id is not None and torch.all(next_token == eos_token_id):
@@ -146,11 +172,13 @@ class InferenceEngine:
                     decode_input,
                     use_cache=True,
                     past_key_values=past_key_values,
-                    position_offset=tokens.size(1) - 1,
+                    position_offset=current_length - 1,
                 )
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
             decode_t1 = time.perf_counter()
+
+        tokens = tokens[:, :current_length]
 
         if not return_stats:
             return tokens

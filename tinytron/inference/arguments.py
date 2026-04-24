@@ -40,6 +40,8 @@ def _add_inference_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     g.add_argument("--max_new_tokens", type=int, default=64)
     g.add_argument("--device", type=str, default="cuda")
     g.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp32"])
+    g.add_argument("--paged_kv_cache", action=argparse.BooleanOptionalAction, default=True)
+    g.add_argument("--kv_cache_page_size", type=int, default=128)
     return parser
 
 

@@ -77,7 +77,7 @@ class GPT(nn.Module):
         self,
         idx: torch.Tensor,
         targets: torch.Tensor = None,
-        past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        past_key_values: object | None = None,
         use_cache: bool = False,
         position_offset: int = 0,
     ):
@@ -85,13 +85,17 @@ class GPT(nn.Module):
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         x = self.wte(idx) # token embeddings of shape (B, T, n_embd)
         total_aux_loss = 0.0
-        new_past_key_values = [] if use_cache else None
+        paged_cache = past_key_values if hasattr(past_key_values, "get_layer_cache") else None
+        new_past_key_values = paged_cache if paged_cache is not None else ([] if use_cache else None)
         for layer_idx, block in enumerate(self.blocks):
-            layer_past = past_key_values[layer_idx] if past_key_values is not None else None
+            if paged_cache is not None:
+                layer_past = paged_cache.get_layer_cache(layer_idx)
+            else:
+                layer_past = past_key_values[layer_idx] if past_key_values is not None else None
             x, gate_logits, new_kv = block(x, past_kv=layer_past, use_cache=use_cache, position_offset=position_offset)
             if gate_logits is not None and targets is not None:
                 total_aux_loss += self.expert_loss_fn(gate_logits)
-            if use_cache:
+            if use_cache and paged_cache is None:
                 new_past_key_values.append(new_kv)
         x = self.lnf(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
