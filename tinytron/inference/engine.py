@@ -48,7 +48,7 @@ class InferenceEngine:
         except AssertionError:
             return state_dict
 
-        if sep_size <= 1:
+        if sep_size is None or sep_size <= 1:
             return state_dict
 
         head_dim = model_config.hidden_size // model_config.num_attention_heads

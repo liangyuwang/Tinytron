@@ -68,6 +68,8 @@ class PagedKVCache:
             sep_size = parallel_state.get_sep_world_size()
         except AssertionError:
             sep_size = 1
+        if sep_size is None:
+            sep_size = 1
         if sep_size > 1:
             if model_config.num_attention_heads % sep_size != 0:
                 raise ValueError(

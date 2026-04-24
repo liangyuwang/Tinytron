@@ -122,6 +122,8 @@ class Attention(nn.Module):
                 sp_size = parallel_state.get_sep_world_size()
             except AssertionError:
                 sp_size = 1
+            if sp_size is None:
+                sp_size = 1
             if sp_size > 1:
                 if self.num_attention_heads % sp_size != 0:
                     raise ValueError(
