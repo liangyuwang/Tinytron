@@ -6,7 +6,7 @@ from contextlib import nullcontext
 import time
 
 from tinytron.model import GPT
-from tinytron.training.config import ModelConfig
+from tinytron.model.config import ModelConfig
 from tinytron.distributed import parallel_state
 from .sampler import sample_next_token
 

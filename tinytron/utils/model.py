@@ -1,6 +1,6 @@
 import torch
 
-from tinytron.training.config import ModelConfig
+from tinytron.model.config import ModelConfig
 
 def get_model_params(model_config: ModelConfig):
     if model_config.use_moe:

@@ -1,3 +1,4 @@
+from .config import ModelConfig, add_model_config_args, build_model_config
 from .gpt import GPT, Block
 
 from .modules.emb import TextEmbedding, ImgEmbedding

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from tinytron.training.config import ModelConfig
+from tinytron.model.config import ModelConfig
 
 class LayerNorm(nn.Module):
     def __init__(self, config: ModelConfig):

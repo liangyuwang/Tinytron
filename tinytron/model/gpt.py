@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.nn import functional as F
 
-from tinytron.training.config import ModelConfig
+from tinytron.model.config import ModelConfig
 from .modules.attn import Attention
 from .modules.mlp import MLP, MoE
 from .modules.norm import LayerNorm

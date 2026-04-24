@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 
+from tinytron.model.config import add_model_config_args
+
 
 def add_all_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser = _add_logging_args(parser)
@@ -115,21 +117,5 @@ def _add_parallel_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
 
 def _add_model_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     g = parser.add_argument_group("model")
-    # Map to model.GPTConfig fields
-    g.add_argument("--block_size", type=int, default=4096)
-    g.add_argument("--vocab_size", type=int, default=50304)
-    g.add_argument("--num_layer", type=int, default=32)
-    g.add_argument("--num_attention_heads", type=int, default=128)
-    g.add_argument("--num_key_value_heads", type=int, default=8)
-    g.add_argument("--hidden_size", type=int, default=1024)
-    g.add_argument("--intermediate_size", type=int, default=4096)
-    g.add_argument("--dropout", type=float, default=0.0)
-    g.add_argument("--init_std", type=float, default=0.013)
-    g.add_argument("--tied_lm_head", action=argparse.BooleanOptionalAction, default=True)
-
-    # MoE
-    g.add_argument("--use_moe", action="store_true")
-    g.add_argument("--num_experts", type=int, default=128)
-    g.add_argument("--num_experts_per_tok", type=int, default=8)
-    g.add_argument("--moe_intermediate_size", type=int, default=256)
+    add_model_config_args(g)
     return parser

@@ -4,7 +4,8 @@ import os
 import torch
 import torch.distributed as dist
 
-from tinytron.training.config import ModelConfig, ParallelConfig
+from tinytron.model.config import ModelConfig, build_model_config
+from tinytron.training.config import ParallelConfig
 from tinytron.inference import InferenceEngine
 from tinytron.inference.arguments import build_parser, parse_prompt_token_ids
 from tinytron.distributed import parallel_state
@@ -59,23 +60,7 @@ def load_model_config_from_checkpoint(args) -> ModelConfig:
             model_cfg_dict = meta.get("config", {}).get("model")
 
     if model_cfg_dict is None:
-        model_cfg = ModelConfig(
-            seed=args.seed,
-            block_size=args.block_size,
-            vocab_size=args.vocab_size,
-            num_layer=args.num_layer,
-            num_attention_heads=args.num_attention_heads,
-            num_key_value_heads=args.num_key_value_heads,
-            hidden_size=args.hidden_size,
-            intermediate_size=args.intermediate_size,
-            dropout=args.dropout,
-            init_std=args.init_std,
-            tied_lm_head=args.tied_lm_head,
-            use_moe=args.use_moe,
-            num_experts=args.num_experts,
-            num_experts_per_tok=args.num_experts_per_tok,
-            moe_intermediate_size=args.moe_intermediate_size,
-        )
+        model_cfg = build_model_config(args, seed=args.seed)
     else:
         model_cfg = ModelConfig(**model_cfg_dict)
 

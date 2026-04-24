@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from tinytron.training.config import ModelConfig
+from tinytron.model.config import ModelConfig
 from tinytron.distributed import (
     parallel_state,
     ulysses_all_to_all,

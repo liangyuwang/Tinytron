@@ -3,6 +3,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 import argparse
 
+from tinytron.model.config import ModelConfig, build_model_config
+
 @dataclass(frozen=True)
 class Config:
     logging: LoggingConfig
@@ -107,30 +109,6 @@ class ParallelConfig:
 
     use_distributed_optimizer: bool = True
 
-@dataclass(frozen=True)
-class ModelConfig:
-    seed: int = 1337
-    block_size: int = 4096
-    vocab_size: int = 50304
-    num_layer: int = 32
-    num_attention_heads: int = 128
-    num_key_value_heads: int = 8
-    hidden_size: int = 1024
-    intermediate_size: int = 4096
-    dropout: float = 0.0
-    init_std: float = 0.013
-    tied_lm_head: bool = True
-
-    # MoE
-    use_moe: bool = False
-    num_experts: int = 128
-    num_experts_per_tok: int = 8
-    moe_intermediate_size: int = 256
-
-    # Inference-only optimization: shard q/k/v projections by SEP head shard.
-    inference_shard_qkv: bool = False
-
-
 def build_config(args: argparse.Namespace) -> Config:
     logging_cfg = LoggingConfig(
         exp_name=args.exp_name,
@@ -188,22 +166,7 @@ def build_config(args: argparse.Namespace) -> Config:
         use_distributed_optimizer=args.use_distributed_optimizer,
     )
 
-    model_cfg = ModelConfig(
-        block_size=args.block_size,
-        vocab_size=args.vocab_size,
-        num_layer=args.num_layer,
-        num_attention_heads=args.num_attention_heads,
-        num_key_value_heads=args.num_key_value_heads,
-        hidden_size=args.hidden_size,
-        intermediate_size=args.intermediate_size,
-        dropout=args.dropout,
-        init_std=args.init_std,
-        tied_lm_head=args.tied_lm_head,
-        use_moe=args.use_moe,
-        num_experts=args.num_experts,
-        num_experts_per_tok=args.num_experts_per_tok,
-        moe_intermediate_size=args.moe_intermediate_size,
-    )
+    model_cfg = build_model_config(args)
 
     cfg = Config(
         logging=logging_cfg,
