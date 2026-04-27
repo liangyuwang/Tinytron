@@ -159,16 +159,6 @@ class Attention(nn.Module):
             torch.manual_seed(base_seed + layer_idx)
             torch.nn.init.normal_(self.c_proj.weight, mean=0.0, std=self.config.init_std)
 
-    def _gather_sp_head_shards(
-        self,
-        y_local: torch.Tensor,
-        sp_group,
-        sp_size: int,
-    ) -> torch.Tensor:
-        gathered = [torch.empty_like(y_local) for _ in range(sp_size)]
-        dist.all_gather(gathered, y_local.contiguous(), group=sp_group)
-        return torch.cat(gathered, dim=1)
-
     def _get_sp_context(self) -> tuple[object | None, int, int]:
         if dist.is_available() and dist.is_initialized():
             try:
@@ -350,25 +340,38 @@ class Attention(nn.Module):
 
         return k_local, v_local, attn_mask, is_causal
 
-    def _restore_sp_output_layout(
+    def _finalize_attention_output(
         self,
         y: torch.Tensor,
         B: int,
         H: int,
         H_local: int,
         T_local: int,
+        C: int,
         sp_group,
         sp_size: int,
+        sp_rank: int,
         sp_decode_mode: bool,
     ) -> torch.Tensor:
         if sp_decode_mode:
-            y = self._gather_sp_head_shards(y, sp_group, sp_size)
-        elif sp_size > 1:
+            local_hidden_size = H_local * self.head_dim
+            hidden_start = sp_rank * local_hidden_size
+            hidden_end = hidden_start + local_hidden_size
+
+            y = y.transpose(-2, -3).reshape(B, T_local, local_hidden_size)
+            c_proj_weight_local = self.c_proj.weight[:, hidden_start:hidden_end].contiguous()
+            y = F.linear(y, c_proj_weight_local)
+            dist.all_reduce(y, op=dist.ReduceOp.SUM, group=sp_group)
+            return y
+
+        if sp_size > 1:
             y = y.view(B, H_local, sp_size, T_local, self.head_dim)
             y = y.permute(2, 0, 1, 3, 4).contiguous()
             y = ulysses_all_to_all(y, sp_group)
             y = y.permute(1, 0, 2, 3, 4).contiguous()
-        return y.view(B, H, T_local, self.head_dim)
+
+        y = y.transpose(-2, -3).reshape(B, T_local, C)
+        return self.c_proj(y)
 
     def forward(
         self,
@@ -417,18 +420,18 @@ class Attention(nn.Module):
             attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
         )
 
-        y = self._restore_sp_output_layout(
+        y = self._finalize_attention_output(
             y=y,
             B=B,
             H=H,
             H_local=H_local,
             T_local=T_local,
+            C=C,
             sp_group=sp_group,
             sp_size=sp_size,
+            sp_rank=sp_rank,
             sp_decode_mode=sp_decode_mode,
         )
-        y = y.transpose(-2, -3).reshape(B, T_local, C)
-        y = self.c_proj(y)
         if use_cache:
             new_kv = past_kv if _is_paged_kv_cache(past_kv) else (k_local, v_local)
             return y, new_kv
