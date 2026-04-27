@@ -23,6 +23,7 @@ class ModelConfig:
     num_experts: int = 128
     num_experts_per_tok: int = 8
     moe_intermediate_size: int = 256
+    moe_balance_loss_weight: float = 0.01
 
     # Inference-only optimization: shard q/k/v projections by SEP head shard.
     inference_shard_qkv: bool = False
@@ -44,6 +45,7 @@ def add_model_config_args(parser: argparse._ArgumentGroup | argparse.ArgumentPar
     parser.add_argument("--num_experts", type=int, default=defaults.num_experts)
     parser.add_argument("--num_experts_per_tok", type=int, default=defaults.num_experts_per_tok)
     parser.add_argument("--moe_intermediate_size", type=int, default=defaults.moe_intermediate_size)
+    parser.add_argument("--moe_balance_loss_weight", type=float, default=defaults.moe_balance_loss_weight)
     return parser
 
 
@@ -63,6 +65,7 @@ def build_model_config(args: argparse.Namespace, **overrides) -> ModelConfig:
         num_experts=args.num_experts,
         num_experts_per_tok=args.num_experts_per_tok,
         moe_intermediate_size=args.moe_intermediate_size,
+        moe_balance_loss_weight=args.moe_balance_loss_weight,
     )
     values.update(overrides)
     return ModelConfig(**values)

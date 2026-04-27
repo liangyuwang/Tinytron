@@ -317,6 +317,7 @@ class ModelConfig:
     num_experts: int = 128              # Total number of experts
     num_experts_per_tok: int = 8        # Active experts per token
     moe_intermediate_size: int = 256    # Expert FFN size
+    moe_balance_loss_weight: float = 0.01 # Set 0 to disable MoE balance loss
 ```
 
 ### Training Arguments (CLI → `TrainingConfig`)
@@ -341,6 +342,7 @@ Key CLI options (see `tinytron/training/arguments.py` for full list):
 | `--use_distributed_optimizer` | `True` | Enable ZeRO-1-style optimizer sharding |
 | `--pin_memory` | `True` | Enable DataLoader pinned memory |
 | `--tied_lm_head` | `True` | Tie token embedding and LM head weights |
+| `--moe_balance_loss_weight` | `0.01` | MoE load-balancing loss weight (`0` disables it) |
 | `--use_compile` | flag | PyTorch 2.0 compilation |
 
 ### Parallelism Configuration
@@ -398,6 +400,18 @@ Native support for Muon + ZeRO-1 is also available:
 
 ```bash
 --optimizer muon --use_distributed_optimizer
+```
+
+### MoE Balance Loss
+
+MoE models add load-balancing loss by default with `--moe_balance_loss_weight 0.01`. Disable it or tune it from either the CLI or launch scripts:
+
+```bash
+# Direct CLI
+--moe_balance_loss_weight 0
+
+# Training scripts
+MODEL_SIZE=0.3B-A0.17B MOE_BALANCE_LOSS_WEIGHT=0 bash scripts/debug/pretrain.sh
 ```
 
 ### Gradient Accumulation

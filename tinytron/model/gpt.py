@@ -61,7 +61,15 @@ class GPT(nn.Module):
         if config.tied_lm_head:
             self.lm_head.weight = self.wte.weight
         self.loss_fn = CrossEntropyLoss()
-        self.expert_loss_fn = ExpertLoadBalancingLoss(config.num_experts, config.num_experts_per_tok)
+        self.expert_loss_fn = (
+            ExpertLoadBalancingLoss(
+                config.num_experts,
+                config.num_experts_per_tok,
+                alpha=config.moe_balance_loss_weight,
+            )
+            if config.use_moe and config.moe_balance_loss_weight > 0.0
+            else None
+        )
         self._init_weights(config.seed)
 
     def _init_weights(self, base_seed: int):
@@ -93,7 +101,7 @@ class GPT(nn.Module):
             else:
                 layer_past = past_key_values[layer_idx] if past_key_values is not None else None
             x, gate_logits, new_kv = block(x, past_kv=layer_past, use_cache=use_cache, position_offset=position_offset)
-            if gate_logits is not None and targets is not None:
+            if self.expert_loss_fn is not None and gate_logits is not None and targets is not None:
                 total_aux_loss += self.expert_loss_fn(gate_logits)
             if use_cache and paged_cache is None:
                 new_past_key_values.append(new_kv)

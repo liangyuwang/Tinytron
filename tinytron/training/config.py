@@ -204,3 +204,5 @@ def validate_static(cfg: Config) -> None:
         raise ValueError("num_attention_heads must be divisible by num_key_value_heads (GQA).")
     if cfg.model.use_moe and cfg.model.num_experts_per_tok <= 0:
         raise ValueError("num_experts_per_tok must be positive when use_moe is enabled.")
+    if cfg.model.moe_balance_loss_weight < 0:
+        raise ValueError("moe_balance_loss_weight must be non-negative.")

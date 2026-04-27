@@ -49,6 +49,7 @@ USE_COMPILE=${USE_COMPILE:-1}
 DEBUG=${DEBUG:-1}
 DETER_MODE=${DETER_MODE:-1} # deter mode for precision alignment
 MODEL_SIZE=${MODEL_SIZE:-0.25B}
+MOE_BALANCE_LOSS_WEIGHT=${MOE_BALANCE_LOSS_WEIGHT:-}
 
 DISTRIBUTED_ARGS="\
   --nnodes=$NUM_NODES \
@@ -319,5 +320,8 @@ case $MODEL_SIZE in
         ;;
 esac
 
+if [ -n "$MOE_BALANCE_LOSS_WEIGHT" ]; then
+  MODEL_ARGS="$MODEL_ARGS --moe_balance_loss_weight $MOE_BALANCE_LOSS_WEIGHT"
+fi
 
 torchrun $DISTRIBUTED_ARGS scripts/debug/pretrain.py $TRAINING_ARGS $PARALLELISM_ARGS $MODEL_ARGS
