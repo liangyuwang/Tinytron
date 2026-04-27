@@ -169,6 +169,207 @@ class Attention(nn.Module):
         dist.all_gather(gathered, y_local.contiguous(), group=sp_group)
         return torch.cat(gathered, dim=1)
 
+    def _get_sep_context(self) -> tuple[object | None, int, int]:
+        if dist.is_available() and dist.is_initialized():
+            try:
+                return (
+                    parallel_state.get_sep_group(),
+                    parallel_state.get_sep_world_size(),
+                    parallel_state.get_sep_rank(),
+                )
+            except AssertionError:
+                pass
+        return None, 1, 0
+
+    def _concat_nonpaged_past(
+        self,
+        k_local: torch.Tensor,
+        v_local: torch.Tensor,
+        past_kv,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if past_kv is None or _is_paged_kv_cache(past_kv):
+            return k_local, v_local
+
+        k_past, v_past = past_kv
+        k_local = torch.cat([k_past, k_local], dim=2)
+        v_local = torch.cat([v_past, v_local], dim=2)
+        return k_local, v_local
+
+    def _prepare_sep_cache_qkv(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        past_kv,
+        sp_size: int,
+        sp_rank: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        H = self.num_attention_heads
+
+        if self.inference_shard_qkv:
+            H_local = self.q_proj_heads
+            H_kv_local = self.kv_proj_heads
+            q_local = q
+            k_local, v_local = gqa_impl(k, v, H_kv_local, H_local)
+            k_local, v_local = self._concat_nonpaged_past(k_local, v_local, past_kv)
+            return q_local, k_local, v_local, H_local
+
+        assert H % sp_size == 0, f"Attention heads ({H}) must be divisible by sp_size ({sp_size})"
+        H_local = H // sp_size
+        head_slice = slice(sp_rank * H_local, (sp_rank + 1) * H_local)
+        q_local = q[:, head_slice]
+
+        if self.num_key_value_heads % sp_size == 0:
+            H_kv_local = self.num_key_value_heads // sp_size
+            kv_slice = slice(sp_rank * H_kv_local, (sp_rank + 1) * H_kv_local)
+            k_local = k[:, kv_slice]
+            v_local = v[:, kv_slice]
+            k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
+        else:
+            k_full, v_full = gqa_impl(k, v, self.num_key_value_heads, H)
+            k_local = k_full[:, head_slice]
+            v_local = v_full[:, head_slice]
+
+        k_local, v_local = self._concat_nonpaged_past(k_local, v_local, past_kv)
+        return q_local, k_local, v_local, H_local
+
+    def _prepare_sp_training_qkv(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sp_group,
+        sp_size: int,
+        B: int,
+        T_local: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        H = self.num_attention_heads
+        assert H % sp_size == 0, f"Attention heads ({H}) must be divisible by sp_size ({sp_size})"
+        H_local = H // sp_size
+        T_full = sp_size * T_local
+
+        if self.num_key_value_heads % sp_size == 0:
+            H_kv_local = self.num_key_value_heads // sp_size
+
+            q = q.view(B, sp_size, H_local, T_local, self.head_dim)
+            q = q.permute(1, 0, 2, 3, 4).contiguous()
+            q = ulysses_all_to_all(q, sp_group)
+            q = q.permute(1, 2, 0, 3, 4).contiguous()
+            q_local = q.view(B, H_local, T_full, self.head_dim)
+
+            kv = torch.stack([k, v], dim=0)
+            kv = kv.view(2, B, sp_size, H_kv_local, T_local, self.head_dim)
+            kv = kv.permute(2, 0, 1, 3, 4, 5).contiguous()
+            kv = ulysses_all_to_all(kv, sp_group)
+            kv = kv.permute(1, 2, 3, 0, 4, 5).contiguous()
+            kv = kv.view(2, B, H_kv_local, T_full, self.head_dim)
+            k_local, v_local = kv[0], kv[1]
+            k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
+            return q_local, k_local, v_local, H_local
+
+        k, v = gqa_impl(k, v, self.num_key_value_heads, H)
+        qkv = torch.stack([q, k, v], dim=0)
+        qkv = qkv.view(3, B, sp_size, H_local, T_local, self.head_dim)
+        qkv = qkv.permute(2, 0, 1, 3, 4, 5).contiguous()
+        qkv = ulysses_all_to_all(qkv, sp_group)
+        qkv = qkv.permute(1, 2, 3, 0, 4, 5).contiguous()
+        qkv = qkv.view(3, B, H_local, T_full, self.head_dim)
+        q_local, k_local, v_local = qkv[0], qkv[1], qkv[2]
+        return q_local, k_local, v_local, H_local
+
+    def _prepare_local_qkv(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        past_kv,
+        use_cache: bool,
+        sp_group,
+        sp_size: int,
+        sp_rank: int,
+        B: int,
+        T_local: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, bool]:
+        sep_cache_inference = use_cache and sp_size > 1
+
+        if sep_cache_inference:
+            q_local, k_local, v_local, H_local = self._prepare_sep_cache_qkv(
+                q=q,
+                k=k,
+                v=v,
+                past_kv=past_kv,
+                sp_size=sp_size,
+                sp_rank=sp_rank,
+            )
+            return q_local, k_local, v_local, H_local, True
+
+        if sp_size > 1:
+            q_local, k_local, v_local, H_local = self._prepare_sp_training_qkv(
+                q=q,
+                k=k,
+                v=v,
+                sp_group=sp_group,
+                sp_size=sp_size,
+                B=B,
+                T_local=T_local,
+            )
+            return q_local, k_local, v_local, H_local, False
+
+        H_local = self.num_attention_heads
+        q_local = q
+        k_local, v_local = gqa_impl(k, v, self.num_key_value_heads, H_local)
+        k_local, v_local = self._concat_nonpaged_past(k_local, v_local, past_kv)
+        return q_local, k_local, v_local, H_local, False
+
+    def _prepare_attention_inputs(
+        self,
+        q_local: torch.Tensor,
+        k_local: torch.Tensor,
+        v_local: torch.Tensor,
+        past_kv,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, bool]:
+        attn_mask = None
+        is_causal = True
+
+        if _is_paged_kv_cache(past_kv):
+            past_len = past_kv.append(k_local, v_local)
+            k_local, v_local = past_kv.get_kv()
+        elif past_kv is not None:
+            past_len = past_kv[0].size(2)
+        else:
+            past_len = 0
+
+        if past_len > 0:
+            attn_mask = build_cache_causal_mask(
+                query_len=q_local.size(2),
+                key_len=k_local.size(2),
+                past_len=past_len,
+                device=q_local.device,
+            )
+            is_causal = False
+
+        return k_local, v_local, attn_mask, is_causal
+
+    def _restore_attention_output_layout(
+        self,
+        y: torch.Tensor,
+        B: int,
+        H: int,
+        H_local: int,
+        T_local: int,
+        sp_group,
+        sp_size: int,
+        sep_cache_inference: bool,
+    ) -> torch.Tensor:
+        if sep_cache_inference:
+            y = self._gather_heads_across_sep(y, sp_group, sp_size)
+        elif sp_size > 1:
+            y = y.view(B, H_local, sp_size, T_local, self.head_dim)
+            y = y.permute(2, 0, 1, 3, 4).contiguous()
+            y = ulysses_all_to_all(y, sp_group)
+            y = y.permute(1, 0, 2, 3, 4).contiguous()
+        return y.view(B, H, T_local, self.head_dim)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -177,149 +378,56 @@ class Attention(nn.Module):
         position_offset: int = 0,
     ):
         B, T_local, C = x.size()
-        if dist.is_available() and dist.is_initialized():
-            try:
-                sp_group = parallel_state.get_sep_group()
-                sp_size = parallel_state.get_sep_world_size()
-                sp_rank = parallel_state.get_sep_rank()
-            except AssertionError:
-                sp_group = None
-                sp_size = 1
-                sp_rank = 0
-        else:
-            sp_group = None
-            sp_size = 1
-            sp_rank = 0
+        sp_group, sp_size, sp_rank = self._get_sep_context()
         sep_cache_inference = use_cache and sp_size > 1
-        q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x) # (B, T, n_embd)
-        q = q.view(B, T_local, self.q_proj_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
-        k = k.view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
-        v = v.view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3) # (B, nh, T, hs)
+
+        q = self.q_proj(x).view(B, T_local, self.q_proj_heads, self.head_dim).transpose(-2, -3)
+        k = self.k_proj(x).view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3)
+        v = self.v_proj(x).view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3)
+
         start_pos = position_offset if sep_cache_inference else sp_rank * T_local + position_offset
         end_pos = start_pos + T_local
         if self.pos is None or self.pos.size(1) != T_local or self.pos[0, 0] != start_pos:
             self.pos = torch.arange(start_pos, end_pos, device=x.device).unsqueeze(0)
         q, k = rope_impl(q, k, self.pos)
-        
+
         H = self.num_attention_heads
-        if sep_cache_inference and self.inference_shard_qkv:
-            H_local = self.q_proj_heads
-            H_kv_local = self.kv_proj_heads
-            q_local = q
-            k_local = k
-            v_local = v
-            k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
-            if past_kv is not None and not _is_paged_kv_cache(past_kv):
-                k_past, v_past = past_kv
-                k_local = torch.cat([k_past, k_local], dim=2)
-                v_local = torch.cat([v_past, v_local], dim=2)
-        elif sep_cache_inference:
-            assert H % sp_size == 0, f"Attention heads ({H}) must be divisible by sp_size ({sp_size})"
-            H_local = H // sp_size
-            head_start = sp_rank * H_local
-            head_end = head_start + H_local
-            q_local = q[:, head_start:head_end]
+        q_local, k_local, v_local, H_local, sep_cache_inference = self._prepare_local_qkv(
+            q=q,
+            k=k,
+            v=v,
+            past_kv=past_kv,
+            use_cache=use_cache,
+            sp_group=sp_group,
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            B=B,
+            T_local=T_local,
+        )
 
-            if self.num_key_value_heads % sp_size == 0:
-                H_kv_local = self.num_key_value_heads // sp_size
-                kv_head_start = sp_rank * H_kv_local
-                kv_head_end = kv_head_start + H_kv_local
-                k_local = k[:, kv_head_start:kv_head_end]
-                v_local = v[:, kv_head_start:kv_head_end]
-                k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
-            else:
-                H_kv_local = H_local
-                k, v = gqa_impl(k, v, self.num_key_value_heads, H)
-                k_local = k[:, head_start:head_end]
-                v_local = v[:, head_start:head_end]
-
-            if past_kv is not None and not _is_paged_kv_cache(past_kv):
-                k_past, v_past = past_kv
-                k_local = torch.cat([k_past, k_local], dim=2)
-                v_local = torch.cat([v_past, v_local], dim=2)
-        elif sp_size > 1:
-            # sp all to all
-            assert H % sp_size == 0, f"Attention heads ({H}) must be divisible by sp_size ({sp_size})"
-            H_local = H // sp_size
-            T_full = sp_size * T_local
-            if self.num_key_value_heads % sp_size == 0:
-                H_kv_local = self.num_key_value_heads // sp_size
-                q = q.view(B, sp_size, H_local, T_local, self.head_dim)
-                q = q.permute(1, 0, 2, 3, 4).contiguous()   # [sp, B, H_local, T_local, D]
-                q = ulysses_all_to_all(q, sp_group)
-                q = q.permute(1, 2, 0, 3, 4).contiguous()   # [B, H_local, sp, T_local, D]
-                q_local = q.view(B, H_local, T_full, self.head_dim)
-
-                kv = torch.stack([k, v], dim=0)
-                kv = kv.view(2, B, sp_size, H_kv_local, T_local, self.head_dim)
-                kv = kv.permute(2, 0, 1, 3, 4, 5).contiguous()  # [sp, 2, B, H_kv_local, T_local, D]
-                kv = ulysses_all_to_all(kv, sp_group)
-                kv = kv.permute(1, 2, 3, 0, 4, 5).contiguous()  # [2, B, H_kv_local, sp, T_local, D]
-                kv = kv.view(2, B, H_kv_local, T_full, self.head_dim)
-                k_local, v_local = kv[0], kv[1]
-                k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
-            else:
-                k, v = gqa_impl(k, v, self.num_key_value_heads, H)
-                qkv = torch.stack([q, k, v], dim=0)
-                qkv = qkv.view(3, B, sp_size, H_local, T_local, self.head_dim)
-                qkv = qkv.permute(2, 0, 1, 3, 4, 5).contiguous()  # [sp, 3, B, H_local, T_local, D]
-                qkv = ulysses_all_to_all(qkv, sp_group)
-                qkv = qkv.permute(1, 2, 3, 0, 4, 5).contiguous()  # [3, B, H_local, sp, T_local, D]
-                qkv = qkv.view(3, B, H_local, T_full, self.head_dim)
-                q_local, k_local, v_local = qkv[0], qkv[1], qkv[2]
-        else:
-            H_local = H
-            H_kv_local = self.num_key_value_heads
-            q_local, k_local, v_local = q, k, v
-            k_local, v_local = gqa_impl(k_local, v_local, H_kv_local, H_local)
-            if past_kv is not None and not _is_paged_kv_cache(past_kv):
-                k_past, v_past = past_kv
-                k_local = torch.cat([k_past, k_local], dim=2)
-                v_local = torch.cat([v_past, v_local], dim=2)
-
-        # local attention computation
         dropout_p = self.dropout if self.training else 0.0
-        attn_mask = None
-        is_causal = True
-        if _is_paged_kv_cache(past_kv):
-            past_len = past_kv.append(k_local, v_local)
-            k_local, v_local = past_kv.get_kv()
-        elif past_kv is not None:
-            past_len = past_kv[0].size(2)
-            attn_mask = build_cache_causal_mask(
-                query_len=q_local.size(2),
-                key_len=k_local.size(2),
-                past_len=past_len,
-                device=q_local.device,
-            )
-            is_causal = False
-        else:
-            past_len = 0
-        if past_len > 0 and attn_mask is None:
-            attn_mask = build_cache_causal_mask(
-                query_len=q_local.size(2),
-                key_len=k_local.size(2),
-                past_len=past_len,
-                device=q_local.device,
-            )
-            is_causal = False
+        k_local, v_local, attn_mask, is_causal = self._prepare_attention_inputs(
+            q_local=q_local,
+            k_local=k_local,
+            v_local=v_local,
+            past_kv=past_kv,
+        )
         y = self.attn_fn(
-            q_local, k_local, v_local, 
+            q_local, k_local, v_local,
             attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
         )
 
-        if sep_cache_inference:
-            y = self._gather_heads_across_sep(y, sp_group, sp_size)
-        elif sp_size > 1:
-            # sp all to all back
-            y = y.view(B, H_local, sp_size, T_local, self.head_dim)
-            y = y.permute(2, 0, 1, 3, 4).contiguous()   # [sp, B, H_local, T_local, D]
-            y = ulysses_all_to_all(y, sp_group)
-            y = y.permute(1, 0, 2, 3, 4).contiguous()   # [B, sp, H_local, T_local, D]
-        y = y.view(B, H, T_local, self.head_dim)
-
+        y = self._restore_attention_output_layout(
+            y=y,
+            B=B,
+            H=H,
+            H_local=H_local,
+            T_local=T_local,
+            sp_group=sp_group,
+            sp_size=sp_size,
+            sep_cache_inference=sep_cache_inference,
+        )
         y = y.transpose(-2, -3).reshape(B, T_local, C)
-        # output projection
         y = self.c_proj(y)
         if use_cache:
             new_kv = past_kv if _is_paged_kv_cache(past_kv) else (k_local, v_local)
