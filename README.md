@@ -58,6 +58,8 @@ Tinytron is intended to be edited in place. A typical loop is:
 
 Most experiment surfaces are deliberately local: model code lives under `tinytron/model`, parallel collectives under `tinytron/distributed`, training state under `tinytron/training`, optimizer variants under `tinytron/optim`, and launch defaults under `scripts`.
 
+For AI-assisted research workflows, see `research-skills/tinytron-research/`. It contains a repo-specific skill and compact references for architecture, inference/KV-cache, optimizer, and experiment-protocol work.
+
 ## Project Structure
 
 ```
@@ -114,6 +116,11 @@ Most experiment surfaces are deliberately local: model code lives under `tinytro
 │   ├── example/
 │   │   ├── pretrain.py                     # Example entry (Streaming-Dataloader)
 │   │   └── pretrain.sh                     # Configurable real-data launch script
+│
+├── research-skills/                        # Repo-specific research skills
+│   └── tinytron-research/
+│       ├── SKILL.md
+│       └── references/
 │
 └── README.md
 ```
