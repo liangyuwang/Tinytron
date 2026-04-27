@@ -73,10 +73,10 @@ A minimal, hackable pre-training stack for GPT-style language models. This proje
 │   │   └── pretrain.sh                     # Configurable debug launch script
 │   ├── debug_gpt_0.3b_a0.17b/
 │   │   └── pretrain.sh                     # 0.3B MoE debug (scripts/debug/pretrain.py)
-│   ├── example_gpt_0.25b/
-│   │   └── pretrain.sh                     # 0.25B example with custom data (pretrain_example.py)
+│   ├── example/
+│   │   ├── pretrain.py                     # Example entry (Streaming-Dataloader)
+│   │   └── pretrain.sh                     # 0.25B example with custom data
 │
-├── pretrain_example.py                     # Example entry (custom dataset / tokenizer)
 └── README.md
 ```
 
@@ -93,10 +93,10 @@ Install minimal runtime dependencies:
 pip install torch tqdm numpy
 ```
 
-For `pretrain_example.py`, also install:
+For `scripts/example/pretrain.py`, also clone Streaming-Dataloader into `external/streaming_dataloader`:
 
 ```bash
-pip install datasets transformers
+git clone https://github.com/liangyuwang/Streaming-Dataloader.git external/streaming_dataloader
 ```
 
 ## Quick Start
@@ -149,7 +149,7 @@ When running under some distributed training platforms, You do not need to speci
 
 ### 3. Custom Dataset
 
-Use the example entry point and override `_init_dataset`: see `pretrain_example.py` for a subclass that uses a real dataset and tokenizer. The base implementation (mock data) lives in `tinytron/training/trainer.py`; override it in your entry script or subclass `Trainer` and pass your dataset there.
+Use the example entry point and override `_init_dataset`: see `scripts/example/pretrain.py` for a subclass that uses a real dataset and tokenizer. The base implementation (mock data) lives in `tinytron/training/trainer.py`; override it in your entry script or subclass `Trainer` and pass your dataset there.
 You can also use [Streaming-Dataloader](https://github.com/liangyuwang/Streaming-Dataloader) to build a memory-efficient streaming dataset pipeline for LLM pretraining.
 
 ### 4. Auto-Tune Throughput (`tok/sec`)
@@ -424,7 +424,7 @@ This generates a Chrome trace file at `<log_dir>/rank{rank}_trace.json` (for the
 
 ### Custom Dataset
 
-Implement your dataset class and override `_init_dataset`: subclass `Trainer` in your entry script (e.g. `pretrain_example.py`) and set `self.train_dataset` to your dataset. Each item should provide tensors compatible with the trainer (e.g. contiguous token ids of length `seq_len+1` for causal LM).
+Implement your dataset class and override `_init_dataset`: subclass `Trainer` in your entry script (e.g. `scripts/example/pretrain.py`) and set `self.train_dataset` to your dataset. Each item should provide tensors compatible with the trainer (e.g. contiguous token ids of length `seq_len+1` for causal LM).
 
 ### Custom Architecture
 
