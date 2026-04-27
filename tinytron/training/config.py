@@ -140,6 +140,7 @@ def build_config(args: argparse.Namespace) -> Config:
     ).with_derived()
 
     optim_cfg = OptimConfig(
+        optimizer=args.optimizer,
         max_lr=args.max_lr,
         min_lr=args.min_lr,
         warmup_steps=args.warmup_steps,
@@ -147,6 +148,7 @@ def build_config(args: argparse.Namespace) -> Config:
         adam_beta1=args.adam_beta1,
         adam_beta2=args.adam_beta2,
         adam_eps=args.adam_eps,
+        muon_momentum=args.muon_momentum,
     )
 
     ckpt_cfg = CheckpointConfig(
@@ -164,7 +166,7 @@ def build_config(args: argparse.Namespace) -> Config:
         use_distributed_optimizer=args.use_distributed_optimizer,
     )
 
-    model_cfg = build_model_config(args)
+    model_cfg = build_model_config(args, seed=args.seed)
 
     cfg = Config(
         logging=logging_cfg,
@@ -191,6 +193,8 @@ def validate_static(cfg: Config) -> None:
         raise ValueError("sep_size must be positive.")
     if cfg.train.precision not in ("bf16", "fp16", "fp32"):
         raise ValueError(f"Unsupported precision: {cfg.train.precision}")
+    if cfg.optim.optimizer not in ("adam", "muon"):
+        raise ValueError(f"Unsupported optimizer: {cfg.optim.optimizer}")
     if cfg.train.max_steps is not None and cfg.optim.warmup_steps >= cfg.train.max_steps:
         raise ValueError("warmup_steps must be < max_steps when max_steps is set.")
     # Model shape constraints (minimal)

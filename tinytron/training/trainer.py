@@ -400,7 +400,8 @@ class Trainer:
             tokens_per_sec = tokens_processed / dt
             mfu, actual, peak = compute_mfu(
                 self.raw_model, self.config.train.batch_size, self.config.train.seq_len, dt, self.training_info["grad_accum_steps"], dtype="bf16")
-            if self.master_process:
+            should_log = step % self.config.logging.log_every == 0 or last_step
+            if self.master_process and should_log:
                 tqdm.write(f"step {step:5d}/{self.training_info['max_steps']} | loss: {self.one_step_results['loss'].item():.6f} | lr {self.one_step_results['lr']:.4e} | grad norm: {self.one_step_results['grad_norm']:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f} | MFU: {mfu*100:.2f}%")
                 with open(self.log_file, "a") as f:
                     f.write(f"{step} train {self.one_step_results['loss'].item():.6f}\n")
