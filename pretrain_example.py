@@ -5,6 +5,7 @@ import glob
 import random
 import numpy as np
 from dataclasses import dataclass
+import argparse
 
 import torch
 import torch.distributed as dist
@@ -22,7 +23,7 @@ from external.streaming_dataloader.dataset import DistributedDataset
 @dataclass
 class StreamingDatasetConfig:
     data_dir: str = "../data/fineweb-edu-sample-10BT/"
-    shuffle: bool = True
+    shuffle: bool = False
     strict: bool = True
     global_skip_batches: int = 0
 
@@ -32,6 +33,7 @@ dataset_cfg: StreamingDatasetConfig | None = None
 
 def parse_args():
     parser = build_parser()
+    streaming_defaults = StreamingDatasetConfig()
 
     # override / extend Tinytron args for streaming dataset
     parser.add_argument(
@@ -43,25 +45,31 @@ def parse_args():
              "If not set, falls back to --dataset_path.",
     )
     parser.add_argument(
-        "--streaming_shuffle",
-        action="store_true",
-        help="Enable deterministic sample shuffle inside Streaming-Dataloader.",
-    )
-    parser.add_argument(
         "--streaming_strict",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=streaming_defaults.strict,
         help="Raise error if total samples < dp_world_size * num_workers.",
     )
     parser.add_argument(
         "--streaming_global_skip_batches",
         type=int,
-        default=0,
+        default=streaming_defaults.global_skip_batches,
         help="Number of globally-consumed samples to skip at dataset start.",
     )
     return parser.parse_args()
 
 
 class OurTrainer(Trainer):
+    def _global_samples_per_step(self) -> int:
+        return (
+            self.training_info["grad_accum_steps"]
+            * self.config.train.batch_size
+            * self.dp_world_size
+        )
+
+    def _dataset_total_samples(self) -> int:
+        return int(self.train_dataset.total_samples)
+
     def _init_dataset(self, config: Config):
         if config.data.use_mock_data:
             return super()._init_dataset(config)
@@ -98,10 +106,11 @@ class OurTrainer(Trainer):
         self.val_loader = None
         self.num_train_samples = self.train_dataset.total_samples
         self.train_loader_iter_idx = 0
+        self.dataset_start_global_sample_offset = int(dataset_cfg.global_skip_batches)
 
         if self.master_process:
             print(f"[dataset] total_tokens={self.train_dataset.total_tokens}")
-            print(f"[dataset] total_samples={len(self.train_dataset)}")
+            print(f"[dataset] total_samples={self._dataset_total_samples()}")
             print(
                 f"[dataset] batch_size={config.train.batch_size}, "
                 f"seq_len={config.train.seq_len}, "
@@ -155,15 +164,25 @@ class OurTrainer(Trainer):
         self.raw_optimizer.load_state_dict(opt_state_placeholder[opt_key])
 
         # 3) dataset state (streaming version)
+        has_dataset_state = "dataset_state" in meta
         dataset_state = meta.get("dataset_state", {})
 
-        epoch = int(dataset_state.get("epoch", 0))
-        global_skip_batches = int(dataset_state.get("global_skip_batches", 0))
-
-        if hasattr(self.train_dataset, "global_skip_batches"):
-            self.train_dataset.global_skip_batches = global_skip_batches
-        if hasattr(self.train_dataset, "set_epoch"):
-            self.train_dataset.set_epoch(epoch)
+        if has_dataset_state:
+            epoch = int(dataset_state.get("epoch", 0))
+            global_skip_batches = int(dataset_state.get("global_skip_batches", 0))
+            if hasattr(self.train_dataset, "global_skip_batches"):
+                self.train_dataset.global_skip_batches = global_skip_batches
+            if hasattr(self.train_dataset, "set_epoch"):
+                self.train_dataset.set_epoch(epoch)
+        else:
+            epoch = int(getattr(self.train_dataset, "epoch", 0))
+            global_skip_batches = int(
+                getattr(
+                    self.train_dataset,
+                    "global_skip_batches",
+                    dataset_cfg.global_skip_batches,
+                )
+            )
 
         self.train_loader_iter_idx = 0
         self.train_loader_iter = enumerate(self.train_loader)
@@ -171,6 +190,12 @@ class OurTrainer(Trainer):
         # 4) next step
         step = meta.get("step", None)
         self.start_step = (step + 1) if (step is not None) else 0
+        if has_dataset_state:
+            absolute_consumed_at_start = epoch * self._dataset_total_samples() + global_skip_batches
+            self.dataset_start_global_sample_offset = (
+                absolute_consumed_at_start
+                - self.start_step * self._global_samples_per_step()
+            )
 
         if self.master_process:
             print(
@@ -203,14 +228,13 @@ class OurTrainer(Trainer):
         # One optimizer step consumes:
         #   grad_accum_steps * batch_size * dp_world_size
         # global samples.
-        global_samples_per_step = (
-            self.training_info["grad_accum_steps"]
-            * self.config.train.batch_size
-            * self.dp_world_size
+        global_samples_per_step = self._global_samples_per_step()
+        consumed_global_samples_next = (
+            int(getattr(self, "dataset_start_global_sample_offset", 0))
+            + next_step * global_samples_per_step
         )
-        consumed_global_samples_next = next_step * global_samples_per_step
 
-        total_samples = int(len(self.train_dataset))
+        total_samples = self._dataset_total_samples()
         dataset_epoch_next = consumed_global_samples_next // total_samples
         global_skip_batches_next = consumed_global_samples_next % total_samples
 
@@ -259,7 +283,6 @@ def main():
     global dataset_cfg
     dataset_cfg = StreamingDatasetConfig(
         data_dir=args.streaming_data_dir or cfg.data.dataset_path,
-        shuffle=bool(args.streaming_shuffle),
         strict=bool(args.streaming_strict),
         global_skip_batches=int(args.streaming_global_skip_batches),
     )
