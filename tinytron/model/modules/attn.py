@@ -119,7 +119,7 @@ class Attention(nn.Module):
         self.kv_proj_heads = self.num_key_value_heads
         if self.inference_shard_qkv:
             try:
-                sp_size = parallel_state.get_sep_world_size()
+                sp_size = parallel_state.get_sp_world_size()
             except AssertionError:
                 sp_size = 1
             if sp_size is None:
@@ -127,12 +127,12 @@ class Attention(nn.Module):
             if sp_size > 1:
                 if self.num_attention_heads % sp_size != 0:
                     raise ValueError(
-                        f"num_attention_heads ({self.num_attention_heads}) must be divisible by sep_size ({sp_size}) "
+                        f"num_attention_heads ({self.num_attention_heads}) must be divisible by sp_size ({sp_size}) "
                         "for inference_shard_qkv."
                     )
                 if self.num_key_value_heads % sp_size != 0:
                     raise ValueError(
-                        f"num_key_value_heads ({self.num_key_value_heads}) must be divisible by sep_size ({sp_size}) "
+                        f"num_key_value_heads ({self.num_key_value_heads}) must be divisible by sp_size ({sp_size}) "
                         "for inference_shard_qkv."
                     )
                 self.q_proj_heads = self.num_attention_heads // sp_size
@@ -159,7 +159,7 @@ class Attention(nn.Module):
             torch.manual_seed(base_seed + layer_idx)
             torch.nn.init.normal_(self.c_proj.weight, mean=0.0, std=self.config.init_std)
 
-    def _gather_heads_across_sep(
+    def _gather_heads_across_sp(
         self,
         y_local: torch.Tensor,
         sp_group,
@@ -169,13 +169,13 @@ class Attention(nn.Module):
         dist.all_gather(gathered, y_local.contiguous(), group=sp_group)
         return torch.cat(gathered, dim=1)
 
-    def _get_sep_context(self) -> tuple[object | None, int, int]:
+    def _get_sp_context(self) -> tuple[object | None, int, int]:
         if dist.is_available() and dist.is_initialized():
             try:
                 return (
-                    parallel_state.get_sep_group(),
-                    parallel_state.get_sep_world_size(),
-                    parallel_state.get_sep_rank(),
+                    parallel_state.get_sp_group(),
+                    parallel_state.get_sp_world_size(),
+                    parallel_state.get_sp_rank(),
                 )
             except AssertionError:
                 pass
@@ -195,7 +195,7 @@ class Attention(nn.Module):
         v_local = torch.cat([v_past, v_local], dim=2)
         return k_local, v_local
 
-    def _prepare_sep_cache_qkv(
+    def _prepare_sp_cache_qkv(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -290,10 +290,10 @@ class Attention(nn.Module):
         B: int,
         T_local: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, bool]:
-        sep_cache_inference = use_cache and sp_size > 1
+        sp_cache_inference = use_cache and sp_size > 1
 
-        if sep_cache_inference:
-            q_local, k_local, v_local, H_local = self._prepare_sep_cache_qkv(
+        if sp_cache_inference:
+            q_local, k_local, v_local, H_local = self._prepare_sp_cache_qkv(
                 q=q,
                 k=k,
                 v=v,
@@ -359,10 +359,10 @@ class Attention(nn.Module):
         T_local: int,
         sp_group,
         sp_size: int,
-        sep_cache_inference: bool,
+        sp_cache_inference: bool,
     ) -> torch.Tensor:
-        if sep_cache_inference:
-            y = self._gather_heads_across_sep(y, sp_group, sp_size)
+        if sp_cache_inference:
+            y = self._gather_heads_across_sp(y, sp_group, sp_size)
         elif sp_size > 1:
             y = y.view(B, H_local, sp_size, T_local, self.head_dim)
             y = y.permute(2, 0, 1, 3, 4).contiguous()
@@ -378,21 +378,21 @@ class Attention(nn.Module):
         position_offset: int = 0,
     ):
         B, T_local, C = x.size()
-        sp_group, sp_size, sp_rank = self._get_sep_context()
-        sep_cache_inference = use_cache and sp_size > 1
+        sp_group, sp_size, sp_rank = self._get_sp_context()
+        sp_cache_inference = use_cache and sp_size > 1
 
         q = self.q_proj(x).view(B, T_local, self.q_proj_heads, self.head_dim).transpose(-2, -3)
         k = self.k_proj(x).view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3)
         v = self.v_proj(x).view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3)
 
-        start_pos = position_offset if sep_cache_inference else sp_rank * T_local + position_offset
+        start_pos = position_offset if sp_cache_inference else sp_rank * T_local + position_offset
         end_pos = start_pos + T_local
         if self.pos is None or self.pos.size(1) != T_local or self.pos[0, 0] != start_pos:
             self.pos = torch.arange(start_pos, end_pos, device=x.device).unsqueeze(0)
         q, k = rope_impl(q, k, self.pos)
 
         H = self.num_attention_heads
-        q_local, k_local, v_local, H_local, sep_cache_inference = self._prepare_local_qkv(
+        q_local, k_local, v_local, H_local, sp_cache_inference = self._prepare_local_qkv(
             q=q,
             k=k,
             v=v,
@@ -425,7 +425,7 @@ class Attention(nn.Module):
             T_local=T_local,
             sp_group=sp_group,
             sp_size=sp_size,
-            sep_cache_inference=sep_cache_inference,
+            sp_cache_inference=sp_cache_inference,
         )
         y = y.transpose(-2, -3).reshape(B, T_local, C)
         y = self.c_proj(y)
