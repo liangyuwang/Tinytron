@@ -1,33 +1,50 @@
 # Tinytron
 
-A minimal, hackable pre-training stack for GPT-style language models. This project provides a clean foundation for training transformer models from scratch with distributed training support.
+Tinytron is a compact, research-oriented pre-training stack for GPT-style language models. It is built for researchers who want a codebase that can be read, modified, and instrumented quickly without fighting a large framework.
+
+The design goal is simple: each subsystem should be small enough to hack directly. Attention, dense MLPs, MoE routing, loss computation, distributed process groups, optimizer sharding, training state, and launch scripts are split into independent modules with explicit boundaries. That makes Tinytron a useful base for architecture experiments, parallelism experiments, optimizer studies, data-pipeline swaps, and inference-path prototyping.
 
 ## Features
 
-- **Modular GPT Architecture**: Flexible transformer implementation with support for:
+- **Hackable model components**:
   - Grouped Query Attention (GQA)
   - Mixture of Experts (MoE)
-  - Customizable attention, MLP, and normalization layers
-  - Flash Attention optimization support
+  - Separate attention, MLP/MoE, normalization, embedding, and loss modules
+  - Shared training and inference model path
   
-- **Distributed Training**:
-  - ZeRO-1 optimizer state partitioning for memory efficiency (Native support for Muon)
+- **Experiment-friendly distributed stack**:
   - DistributedDataParallel (DDP) for multi-GPU training
   - Sequence-Expert joint parallelism via `SEP_SIZE` / `--sep_size` (SEP)
+  - Expert parallel all-to-all communication
+  - ZeRO-1 optimizer state partitioning for memory efficiency
+  - Native support for Muon + ZeRO-1
   - Gradient accumulation for large effective batch sizes
   
-- **Training Optimizations**:
+- **Training and measurement tools**:
   - Mixed precision training (BFloat16)
   - Gradient clipping
   - Cosine learning rate schedule with warmup
   - Automatic checkpoint resumption with full state recovery
-  
-- **Developer-Friendly**:
-  - Comprehensive profiling utilities
   - Model FLOPs Utilization (MFU) tracking
-  - Auto-tune script for fast throughput search (`scripts/autotune.sh`)
+  - PyTorch profiler integration
+  - Auto-tune script for throughput search (`scripts/autotune.sh`)
+
+- **Fast iteration paths**:
   - Mock data mode for rapid debugging
-  - Minimal dependencies
+  - Streaming-Dataloader example for real pre-training data
+  - Size-based model presets for dense and MoE experiments
+  - Minimal dependencies and plain shell launchers
+
+## Research Workflow
+
+Tinytron is intended to be edited in place. A typical loop is:
+
+1. Pick a dense or MoE preset with `MODEL_SIZE=<size>`.
+2. Change the specific module under study, such as attention, MoE routing, the optimizer, the loss, or the data loader.
+3. Run `scripts/debug/pretrain.sh` with mock data to check correctness, distributed behavior, and throughput quickly.
+4. Move the same change to `scripts/example/pretrain.sh` when you want to run against Streaming-Dataloader data.
+
+Most experiment surfaces are deliberately local: model code lives under `tinytron/model`, parallel collectives under `tinytron/distributed`, training state under `tinytron/training`, optimizer variants under `tinytron/optim`, and launch defaults under `scripts`.
 
 ## Project Structure
 
@@ -44,11 +61,20 @@ A minimal, hackable pre-training stack for GPT-style language models. This proje
 │   │       ├── loss.py                     # SP-aware cross entropy loss
 │   │       └── emb.py                      # Embedding layers
 │   │
+│   ├── inference/                          # Inference helpers
+│   │   ├── arguments.py                    # Inference CLI arguments
+│   │   ├── cache.py                        # KV-cache data structures
+│   │   ├── engine.py                       # Autoregressive decode engine
+│   │   └── sampler.py                      # Sampling utilities
+│   │
 │   ├── training/                           # Training pipeline
 │   │   ├── __init__.py
 │   │   ├── config.py                       # Config dataclasses (ModelConfig, etc.)
 │   │   ├── arguments.py                    # CLI argument definitions
 │   │   └── trainer.py                      # Trainer and dataset init
+│   │
+│   ├── optim/                              # Optimizer implementations
+│   │   └── muon.py                         # Muon optimizer
 │   │
 │   ├── distributed/                        # Distributed training components
 │   │   ├── __init__.py
@@ -73,11 +99,9 @@ A minimal, hackable pre-training stack for GPT-style language models. This proje
 │   │   ├── inference.sh                    # Inference debug launch script
 │   │   ├── pretrain.py                     # Debug entry (mock data, minimal deps)
 │   │   └── pretrain.sh                     # Configurable debug launch script
-│   ├── debug_gpt_0.3b_a0.17b/
-│   │   └── pretrain.sh                     # 0.3B MoE debug (scripts/debug/pretrain.py)
 │   ├── example/
 │   │   ├── pretrain.py                     # Example entry (Streaming-Dataloader)
-│   │   └── pretrain.sh                     # 0.25B example with custom data
+│   │   └── pretrain.sh                     # Configurable real-data launch script
 │
 └── README.md
 ```
@@ -108,18 +132,21 @@ git clone https://github.com/liangyuwang/Streaming-Dataloader.git external/strea
 **Using training scripts (recommended):**
 
 ```bash
-# Train 0.25B dense model (8 GPUs)
+# Train the default 0.25B dense model with mock data (8 GPUs)
 bash scripts/debug/pretrain.sh
 
-# Train 0.3B MoE model (8 GPUs)
-bash scripts/debug_gpt_0.3b_a0.17b/pretrain.sh
+# Train a 0.3B MoE preset with mock data
+MODEL_SIZE=0.3B-A0.17B bash scripts/debug/pretrain.sh
 
 # Override SEP (sequence-expert joint) parallel size
 SEP_SIZE=2 bash scripts/debug/pretrain.sh
 
-# Override model size preset
+# Try a larger dense preset
 MODEL_SIZE=7B bash scripts/debug/pretrain.sh
 ```
+
+The debug, example, and inference launch scripts share the same size names:
+`0.03B`, `0.1B`, `0.25B`, `1B`, `1.3B`, `7B`, `13B`, `30B`, `70B`, `0.17B-A0.1B`, `0.3B-A0.17B`, `0.7B-A0.25B`, `2.7B-A1B`, `14B-A4.5B`, `104B-A4.5B`.
 
 **Direct command for quick testing:**
 
@@ -149,12 +176,13 @@ NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 \
 bash scripts/debug/pretrain.sh
 ```
 
-When running under some distributed training platforms, You do not need to specify --node_rank, --nnodes, or --master_addr. 'torchrun' automatically detects and uses these injected variables from 'env://' to set up distributed communication.
+When running under some distributed training platforms, you do not need to specify `--node_rank`, `--nnodes`, or `--master_addr`; `torchrun` can detect injected values from `env://`.
 
-### 3. Custom Dataset
+### 3. Data Pipeline
 
-Use the example entry point and override `_init_dataset`: see `scripts/example/pretrain.py` for a subclass that uses a real dataset and tokenizer. The base implementation (mock data) lives in `tinytron/training/trainer.py`; override it in your entry script or subclass `Trainer` and pass your dataset there.
-You can also use [Streaming-Dataloader](https://github.com/liangyuwang/Streaming-Dataloader) to build a memory-efficient streaming dataset pipeline for LLM pretraining.
+Use `scripts/example/pretrain.py` for the Streaming-Dataloader path. It subclasses `Trainer` and overrides `_init_dataset`, so swapping the data pipeline does not require touching the core trainer. The mock-data path lives in `scripts/debug/pretrain.py` and is useful for checking model, optimizer, and parallelism changes without a real dataset.
+
+You can also replace `_init_dataset` in your own entry script and return any dataset whose batches provide `input_ids` and `labels`.
 
 ### 4. Auto-Tune Throughput (`tok/sec`)
 
@@ -174,11 +202,12 @@ bash scripts/autotune.sh
 Run with custom search space and target script:
 
 ```bash
+MODEL_SIZE=0.3B-A0.17B \
 SEP_SIZES="1 2 4" \
 BATCH_SIZES="4 8 16" \
 TARGET_STEPS=80 \
 WARMUP_STEPS=20 \
-RUN_SCRIPT="scripts/debug_gpt_0.3b_a0.17b/pretrain.sh" \
+RUN_SCRIPT="scripts/debug/pretrain.sh" \
 bash scripts/autotune.sh
 ```
 
@@ -241,15 +270,15 @@ Or use the debug script:
 bash scripts/debug/inference.sh
 
 # Checkpoint run with a preset size
-MODEL_SIZE=0.1B CKPT_PATH=./log/debug_gpt_0.25B/00500_model.pt \
+MODEL_SIZE=0.1B CKPT_PATH=/path/to/00500_model.pt \
 bash scripts/debug/inference.sh
 ```
 
 ## Configuration
 
-Configuration is built from CLI arguments via `tinytron/training/arguments.py` and assembled into a unified `Config` in `tinytron/training/config.py`.
+Configuration is built from CLI arguments via `tinytron/training/arguments.py` and assembled into a unified `Config` in `tinytron/training/config.py`. Configs are ordinary dataclasses, so adding a new experiment knob usually means adding one CLI argument, one config field, and one use site.
 
-### Model Configuration (`ModelConfig` in `tinytron/training/config.py`)
+### Model Configuration (`ModelConfig` in `tinytron/model/config.py`)
 
 ```python
 @dataclass
@@ -262,7 +291,7 @@ class ModelConfig:
     hidden_size: int = 1024             # Hidden dimension
     intermediate_size: int = 4096       # FFN intermediate size
     dropout: float = 0.0                # Dropout rate
-    tied_lm_head: bool = False          # Tie input/output embeddings (enable via --tied_lm_head)
+    tied_lm_head: bool = True           # Tie input/output embeddings
 
     # Mixture of Experts (optional)
     use_moe: bool = False               # Enable MoE
@@ -290,16 +319,16 @@ Key CLI options (see `tinytron/training/arguments.py` for full list):
 | `--do_val` | `False` | Enable validation during training |
 | `--val_every_steps` | `250` | Validation frequency (when `--do_val` is enabled) |
 | `--optimizer` | `adam` | Optimizer type (`adam` / `muon`) |
-| `--use_distributed_optimizer` | `False` | Enable ZeRO-1-style optimizer sharding |
-| `--pin_memory` | `False` | Enable DataLoader pinned memory |
-| `--tied_lm_head` | `False` | Tie token embedding and LM head weights |
+| `--use_distributed_optimizer` | `True` | Enable ZeRO-1-style optimizer sharding |
+| `--pin_memory` | `True` | Enable DataLoader pinned memory |
+| `--tied_lm_head` | `True` | Tie token embedding and LM head weights |
 | `--use_compile` | flag | PyTorch 2.0 compilation |
 
 ### Parallelism Configuration
 
 `sep_size` controls SEP group size (sequence-expert joint parallelism).
 
-- CLI flag: `--sep_size` (default: `8` in `tinytron/training/arguments.py`)
+- CLI flag: `--sep_size` (default: `1` in `tinytron/training/arguments.py`)
 - Script env var: `SEP_SIZE` (mapped to `--sep_size`, script default is `1`)
 - Dense models (`--use_moe` disabled): SEP degenerates to pure SP.
 - Constraints:
@@ -331,7 +360,7 @@ When enabled, the trainer can save and resume checkpoints, preserving:
 - Optimizer states (`*_opt/` directory)
 - Training metadata (`*_meta.pt`): step counter, RNG state, dataloader position
 
-To resume, restart the same training command. The trainer searches checkpoints under the current experiment `log_dir` by default, or you can specify `--resume_path` explicitly.
+To resume, restart the same training command. The trainer searches checkpoints under the current `log_dir` by default, or you can specify `--resume_path` explicitly.
 
 ### ZeRO-1 Optimizer
 
@@ -423,7 +452,17 @@ This generates a Chrome trace file at `<log_dir>/rank{rank}_trace.json` (for the
 --intermediate_size 16384
 ```
 
-## Extending the Code
+## Hacking The Code
+
+Tinytron is meant to be changed directly. The most common edit points are deliberately narrow:
+
+- Model architecture: `tinytron/model/gpt.py` and `tinytron/model/modules/`
+- Attention or sequence parallelism: `tinytron/model/modules/attn.py` and `tinytron/distributed/sequence_parallel/`
+- MoE routing and experts: `tinytron/model/modules/mlp.py` and `tinytron/distributed/expert_parallel/`
+- Loss behavior: `tinytron/model/modules/loss.py`
+- Optimizer behavior: `tinytron/training/trainer.py`, `tinytron/optim/`, and `tinytron/distributed/zero1/`
+- Data loading: subclass `Trainer` and override `_init_dataset`
+- Launch defaults: `scripts/debug/pretrain.sh` and `scripts/example/pretrain.sh`
 
 ### Custom Dataset
 
@@ -525,8 +564,4 @@ This implementation draws inspiration from:
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
----
-
-**Note**: This is a minimal training stack designed for educational purposes and rapid prototyping. For production-scale training, consider using frameworks like DeepSpeed, Megatron-LM, or Composer.
+Contributions are welcome, especially changes that keep the code easy to inspect, easy to modify, and useful for research experiments.

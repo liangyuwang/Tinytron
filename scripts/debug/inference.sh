@@ -8,7 +8,7 @@ set -euo pipefail
 #   bash scripts/debug/inference.sh
 #
 #   # 2) run checkpoint inference with a 0.1B preset
-#   MODEL_SIZE=0.1B CKPT_PATH=./log/debug_gpt_0.25b/00500_model.pt \
+#   MODEL_SIZE=0.1B CKPT_PATH=/path/to/00500_model.pt \
 #   bash scripts/debug/inference.sh
 #
 # Preset model sizes:
