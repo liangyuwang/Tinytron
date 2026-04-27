@@ -159,7 +159,7 @@ class Attention(nn.Module):
             torch.manual_seed(base_seed + layer_idx)
             torch.nn.init.normal_(self.c_proj.weight, mean=0.0, std=self.config.init_std)
 
-    def _gather_heads_across_sp(
+    def _gather_sp_head_shards(
         self,
         y_local: torch.Tensor,
         sp_group,
@@ -195,7 +195,7 @@ class Attention(nn.Module):
         v_local = torch.cat([v_past, v_local], dim=2)
         return k_local, v_local
 
-    def _prepare_sp_cache_qkv(
+    def _prepare_sp_decode_qkv(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -277,7 +277,7 @@ class Attention(nn.Module):
         q_local, k_local, v_local = qkv[0], qkv[1], qkv[2]
         return q_local, k_local, v_local, H_local
 
-    def _prepare_local_qkv(
+    def _prepare_local_attention_qkv(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -290,10 +290,10 @@ class Attention(nn.Module):
         B: int,
         T_local: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, bool]:
-        sp_cache_inference = use_cache and sp_size > 1
+        sp_decode_mode = use_cache and sp_size > 1
 
-        if sp_cache_inference:
-            q_local, k_local, v_local, H_local = self._prepare_sp_cache_qkv(
+        if sp_decode_mode:
+            q_local, k_local, v_local, H_local = self._prepare_sp_decode_qkv(
                 q=q,
                 k=k,
                 v=v,
@@ -321,7 +321,7 @@ class Attention(nn.Module):
         k_local, v_local = self._concat_nonpaged_past(k_local, v_local, past_kv)
         return q_local, k_local, v_local, H_local, False
 
-    def _prepare_attention_inputs(
+    def _prepare_attention_cache_inputs(
         self,
         q_local: torch.Tensor,
         k_local: torch.Tensor,
@@ -350,7 +350,7 @@ class Attention(nn.Module):
 
         return k_local, v_local, attn_mask, is_causal
 
-    def _restore_attention_output_layout(
+    def _restore_sp_output_layout(
         self,
         y: torch.Tensor,
         B: int,
@@ -359,10 +359,10 @@ class Attention(nn.Module):
         T_local: int,
         sp_group,
         sp_size: int,
-        sp_cache_inference: bool,
+        sp_decode_mode: bool,
     ) -> torch.Tensor:
-        if sp_cache_inference:
-            y = self._gather_heads_across_sp(y, sp_group, sp_size)
+        if sp_decode_mode:
+            y = self._gather_sp_head_shards(y, sp_group, sp_size)
         elif sp_size > 1:
             y = y.view(B, H_local, sp_size, T_local, self.head_dim)
             y = y.permute(2, 0, 1, 3, 4).contiguous()
@@ -379,20 +379,20 @@ class Attention(nn.Module):
     ):
         B, T_local, C = x.size()
         sp_group, sp_size, sp_rank = self._get_sp_context()
-        sp_cache_inference = use_cache and sp_size > 1
+        sp_decode_mode = use_cache and sp_size > 1
 
         q = self.q_proj(x).view(B, T_local, self.q_proj_heads, self.head_dim).transpose(-2, -3)
         k = self.k_proj(x).view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3)
         v = self.v_proj(x).view(B, T_local, self.kv_proj_heads, self.head_dim).transpose(-2, -3)
 
-        start_pos = position_offset if sp_cache_inference else sp_rank * T_local + position_offset
+        start_pos = position_offset if sp_decode_mode else sp_rank * T_local + position_offset
         end_pos = start_pos + T_local
         if self.pos is None or self.pos.size(1) != T_local or self.pos[0, 0] != start_pos:
             self.pos = torch.arange(start_pos, end_pos, device=x.device).unsqueeze(0)
         q, k = rope_impl(q, k, self.pos)
 
         H = self.num_attention_heads
-        q_local, k_local, v_local, H_local, sp_cache_inference = self._prepare_local_qkv(
+        q_local, k_local, v_local, H_local, sp_decode_mode = self._prepare_local_attention_qkv(
             q=q,
             k=k,
             v=v,
@@ -406,7 +406,7 @@ class Attention(nn.Module):
         )
 
         dropout_p = self.dropout if self.training else 0.0
-        k_local, v_local, attn_mask, is_causal = self._prepare_attention_inputs(
+        k_local, v_local, attn_mask, is_causal = self._prepare_attention_cache_inputs(
             q_local=q_local,
             k_local=k_local,
             v_local=v_local,
@@ -417,7 +417,7 @@ class Attention(nn.Module):
             attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
         )
 
-        y = self._restore_attention_output_layout(
+        y = self._restore_sp_output_layout(
             y=y,
             B=B,
             H=H,
@@ -425,7 +425,7 @@ class Attention(nn.Module):
             T_local=T_local,
             sp_group=sp_group,
             sp_size=sp_size,
-            sp_cache_inference=sp_cache_inference,
+            sp_decode_mode=sp_decode_mode,
         )
         y = y.transpose(-2, -3).reshape(B, T_local, C)
         y = self.c_proj(y)
