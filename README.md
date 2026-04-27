@@ -69,6 +69,8 @@ A minimal, hackable pre-training stack for GPT-style language models. This proje
 ├── scripts/                                # Launch scripts
 │   ├── autotune.sh                         # Auto-tune SEP_SIZE/BATCH_SIZE by tok/sec
 │   ├── debug/
+│   │   ├── inference.py                    # Debug inference entry (KV cache)
+│   │   ├── inference.sh                    # Inference debug launch script
 │   │   ├── pretrain.py                     # Debug entry (mock data, minimal deps)
 │   │   └── pretrain.sh                     # Configurable debug launch script
 │   ├── debug_gpt_0.3b_a0.17b/
@@ -185,12 +187,12 @@ Outputs:
 
 ### 5. Inference Baseline (KV Cache)
 
-The repository includes a minimal inference entrypoint `inference.py` that reuses the same `tinytron/model` code path and supports autoregressive decoding with per-layer KV cache.
+The repository includes a minimal inference entrypoint `scripts/debug/inference.py` that reuses the same `tinytron/model` code path and supports autoregressive decoding with per-layer KV cache.
 
 Example:
 
 ```bash
-python inference.py \
+python scripts/debug/inference.py \
   --checkpoint_path ./log/your_run/00010_model.pt \
   --prompt_token_ids 1,2,3,4 \
   --max_new_tokens 32 \
@@ -201,7 +203,7 @@ python inference.py \
 SEP distributed inference is also supported through `torchrun`:
 
 ```bash
-torchrun --nproc_per_node 2 inference.py \
+torchrun --nproc_per_node 2 scripts/debug/inference.py \
   --checkpoint_path ./log/your_run/00010_model.pt \
   --prompt_token_ids 1,2,3,4 \
   --max_new_tokens 32 \
@@ -215,15 +217,15 @@ Notes:
 - For `use_moe` with `sep_size > 1`, SEP inference keeps routing local on each rank, computes only local-expert contributions, and merges the replicated MoE outputs with an EP/SEP `all_reduce`.
 - Sampling is synchronized within each SEP group so all ranks advance with the same next token.
 - Output is printed as comma-separated token ids.
-- `inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.
-- Use `scripts/inference_debug.sh` for a one-command debug launch with model-size presets (`tiny`, `small`, `base`, `large`, `moe-sm`).
+- `scripts/debug/inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.
+- Use `scripts/debug/inference.sh` for a one-command debug launch with model-size presets (`tiny`, `small`, `base`, `large`, `moe-sm`).
 - `SEP_SIZE=<n>` makes the debug script switch to `torchrun --nproc_per_node <n>`.
 - `MODEL_SIZE=moe-sm` can run in single-process inference mode (no `init_process_group`) with EP fallback to 1.
 
 Smoke test without a checkpoint (random initialized weights):
 
 ```bash
-python inference.py \
+python scripts/debug/inference.py \
   --init_from_scratch \
   --prompt_token_ids 1,2,3,4 \
   --max_new_tokens 8 \
@@ -234,11 +236,11 @@ Or use the debug script:
 
 ```bash
 # Random-weight smoke test
-bash scripts/inference_debug.sh
+bash scripts/debug/inference.sh
 
 # Checkpoint run with a preset size
 MODEL_SIZE=small CKPT_PATH=./log/debug_gpt_0.25B/00500_model.pt \
-bash scripts/inference_debug.sh
+bash scripts/debug/inference.sh
 ```
 
 ## Configuration

@@ -5,11 +5,11 @@ set -euo pipefail
 #
 # Usage examples:
 #   # 1) smoke test with random weights
-#   bash scripts/inference_debug.sh
+#   bash scripts/debug/inference.sh
 #
 #   # 2) run checkpoint inference with a small preset
 #   MODEL_SIZE=small CKPT_PATH=./log/debug_gpt_0.25b/00500_model.pt \
-#   bash scripts/inference_debug.sh
+#   bash scripts/debug/inference.sh
 #
 # Preset model sizes:
 #   tiny   : 6L,  8QH,  2KVH, hidden=512,  ffn=2048
@@ -32,6 +32,10 @@ SEP_SIZE=${SEP_SIZE:-1}
 NPROC_PER_NODE=${NPROC_PER_NODE:-$SEP_SIZE}
 BACKEND=${BACKEND:-nccl}
 INIT_METHOD=${INIT_METHOD:-env://}
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+cd "$REPO_ROOT"
 
 # defaults (base)
 NUM_LAYER=12
@@ -125,7 +129,7 @@ fi
 
 echo "Running inference with MODEL_SIZE=${MODEL_SIZE}, DEVICE=${DEVICE}, DTYPE=${DTYPE}, SEP_SIZE=${SEP_SIZE}"
 if [[ "${SEP_SIZE}" -gt 1 ]]; then
-  torchrun --nproc_per_node "${NPROC_PER_NODE}" inference.py "${ARGS[@]}"
+  torchrun --nproc_per_node "${NPROC_PER_NODE}" scripts/debug/inference.py "${ARGS[@]}"
 else
-  python inference.py "${ARGS[@]}"
+  python scripts/debug/inference.py "${ARGS[@]}"
 fi
