@@ -1,8 +1,20 @@
 # Tinytron
 
-Tinytron is a compact, research-oriented pre-training stack for GPT-style language models. It is built for researchers who want a codebase that can be read, modified, and instrumented quickly without fighting a large framework.
+Tinytron is a compact, research-oriented pre-training and inference stack for GPT-style language models. It is built for researchers who want a codebase that can be read, modified, and instrumented quickly without fighting a large framework.
 
-The design goal is simple: each subsystem should be small enough to hack directly. Attention, dense MLPs, MoE routing, loss computation, distributed process groups, optimizer sharding, training state, and launch scripts are split into independent modules with explicit boundaries. That makes Tinytron a useful base for architecture experiments, parallelism experiments, optimizer studies, data-pipeline swaps, and inference-path prototyping.
+The design goal is simple: each subsystem should be small enough to hack directly. Attention, dense MLPs, MoE routing, loss computation, inference-time KV cache, optimizer variants, training state, and launch scripts are split into independent modules with explicit boundaries. That makes Tinytron a useful base for model architecture experiments, optimizer studies, KV-cache experiments, inference-path prototyping, and data-pipeline swaps.
+
+## Research Scope
+
+Tinytron is best viewed as a transparent GPT experimentation base rather than a general-purpose distributed-systems framework. The distributed layer is intentionally narrow: it provides DDP, sequence-expert parallel groups, expert all-to-all communication, and ZeRO-1 style optimizer sharding so that model and inference experiments can run beyond a single GPU. It is not designed to expose a large search space of parallelism policies.
+
+Good research fits include:
+
+- **Model architecture**: GQA/MQA/MHA variants, RoPE and long-context changes, dense MLP versus MoE, router design, expert layout, normalization, and loss variants.
+- **Inference strategy**: prefill/decode behavior, sampling methods, MoE inference paths, sharded QKV inference, and lightweight decoding prototypes.
+- **KV-cache design**: paged versus contiguous cache, page size, cache layout, prefix reuse, sliding-window cache, and cache quantization experiments.
+- **Optimizer studies**: AdamW versus Muon, parameter-group policies, router/expert-specific learning rates, weight decay choices, and gradient clipping behavior.
+- **Training and measurement**: small-scale scaling studies, architecture ablations, MFU tracking, profiler-driven bottleneck analysis, and throughput sweeps for a fixed training stack.
 
 ## Features
 
@@ -12,7 +24,7 @@ The design goal is simple: each subsystem should be small enough to hack directl
   - Separate attention, MLP/MoE, normalization, embedding, and loss modules
   - Shared training and inference model path
   
-- **Experiment-friendly distributed stack**:
+- **Distributed support for larger experiments**:
   - DistributedDataParallel (DDP) for multi-GPU training
   - Sequence-Expert joint parallelism via `SEP_SIZE` / `--sep_size` (SEP)
   - Expert parallel all-to-all communication
@@ -41,7 +53,7 @@ Tinytron is intended to be edited in place. A typical loop is:
 
 1. Pick a dense or MoE preset with `MODEL_SIZE=<size>`.
 2. Change the specific module under study, such as attention, MoE routing, the optimizer, the loss, or the data loader.
-3. Run `scripts/debug/pretrain.sh` with mock data to check correctness, distributed behavior, and throughput quickly.
+3. Run `scripts/debug/pretrain.sh` with mock data to check correctness, multi-GPU behavior, and throughput quickly.
 4. Move the same change to `scripts/example/pretrain.sh` when you want to run against Streaming-Dataloader data.
 
 Most experiment surfaces are deliberately local: model code lives under `tinytron/model`, parallel collectives under `tinytron/distributed`, training state under `tinytron/training`, optimizer variants under `tinytron/optim`, and launch defaults under `scripts`.
