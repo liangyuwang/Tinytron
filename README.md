@@ -68,14 +68,14 @@ A minimal, hackable pre-training stack for GPT-style language models. This proje
 │
 ├── scripts/                                # Launch scripts
 │   ├── autotune.sh                         # Auto-tune SEP_SIZE/BATCH_SIZE by tok/sec
-│   ├── debug_gpt_0.25b/
-│   │   └── pretrain.sh                     # 0.25B debug (pretrain_debug.py)
+│   ├── debug/
+│   │   ├── pretrain.py                     # Debug entry (mock data, minimal deps)
+│   │   └── pretrain.sh                     # Configurable debug launch script
 │   ├── debug_gpt_0.3b_a0.17b/
-│   │   └── pretrain.sh                     # 0.3B MoE debug (pretrain_debug.py)
+│   │   └── pretrain.sh                     # 0.3B MoE debug (scripts/debug/pretrain.py)
 │   ├── example_gpt_0.25b/
 │   │   └── pretrain.sh                     # 0.25B example with custom data (pretrain_example.py)
 │
-├── pretrain_debug.py                       # Debug entry (mock data, minimal deps)
 ├── pretrain_example.py                     # Example entry (custom dataset / tokenizer)
 └── README.md
 ```
@@ -107,19 +107,19 @@ pip install datasets transformers
 
 ```bash
 # Train 0.25B dense model (8 GPUs)
-bash scripts/debug_gpt_0.25b/pretrain.sh
+bash scripts/debug/pretrain.sh
 
 # Train 0.3B MoE model (8 GPUs)
 bash scripts/debug_gpt_0.3b_a0.17b/pretrain.sh
 
 # Override SEP (sequence-expert joint) parallel size
-SEP_SIZE=2 bash scripts/debug_gpt_0.25b/pretrain.sh
+SEP_SIZE=2 bash scripts/debug/pretrain.sh
 ```
 
 **Direct command for quick testing:**
 
 ```bash
-torchrun --nproc_per_node=8 pretrain_debug.py \
+torchrun --nproc_per_node=8 scripts/debug/pretrain.py \
   --exp_name debug_test \
   --use_mock_data \
   --mock_data_num_samples 1280 \
@@ -138,11 +138,11 @@ All training scripts support multi-node training via environment variables:
 ```bash
 # Node 0 (master, e.g. IP: 192.168.1.100)
 NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 \
-bash scripts/debug_gpt_0.25b/pretrain.sh
+bash scripts/debug/pretrain.sh
 
 # Node 1 (worker)
 NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 \
-bash scripts/debug_gpt_0.25b/pretrain.sh
+bash scripts/debug/pretrain.sh
 ```
 
 When running under some distributed training platforms, You do not need to specify --node_rank, --nnodes, or --master_addr. 'torchrun' automatically detects and uses these injected variables from 'env://' to set up distributed communication.
@@ -159,7 +159,7 @@ The repository includes an auto-tuner at `scripts/autotune.sh` to search through
 Default search space:
 - `SEP_SIZES="1 2 4 8"`
 - `BATCH_SIZES="1 2 4 8 16 32"`
-- `RUN_SCRIPT="scripts/debug_gpt_0.25b/pretrain.sh"`
+- `RUN_SCRIPT="scripts/debug/pretrain.sh"`
 
 Run with defaults:
 
@@ -237,7 +237,7 @@ Or use the debug script:
 bash scripts/inference_debug.sh
 
 # Checkpoint run with a preset size
-MODEL_SIZE=small CKPT_PATH=./log/debug_gpt_0.25b/00500_model.pt \
+MODEL_SIZE=small CKPT_PATH=./log/debug_gpt_0.25B/00500_model.pt \
 bash scripts/inference_debug.sh
 ```
 
@@ -306,7 +306,7 @@ Key CLI options (see `tinytron/training/arguments.py` for full list):
 Example:
 
 ```bash
-torchrun --nproc_per_node=8 pretrain_debug.py \
+torchrun --nproc_per_node=8 scripts/debug/pretrain.py \
   --batch_size 8 \
   --seq_len 4096 \
   --sep_size 2 \
@@ -384,7 +384,7 @@ MFU = (Actual FLOPs) / (Peak Hardware FLOPs)
 Enable PyTorch profiler for performance analysis:
 
 ```bash
-python pretrain_debug.py \
+python scripts/debug/pretrain.py \
   --use_profiler \
   --steps_to_profile 15 20  # profile on step 15 to 20
 ```

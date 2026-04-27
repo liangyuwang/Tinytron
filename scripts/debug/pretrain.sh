@@ -12,12 +12,16 @@
 #
 # Example for 2 nodes:
 #   Node 0 (master, IP: 192.168.1.100):
-#     NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 bash scripts/debug_gpt_0.25b/pretrain.sh
+#     NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 bash scripts/debug/pretrain.sh
 #   Node 1:
-#     NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 bash scripts/debug_gpt_0.25b/pretrain.sh
+#     NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 bash scripts/debug/pretrain.sh
 #
 
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+cd "$REPO_ROOT"
 
 # Multi-node configuration (can be overridden by environment variables)
 NUM_NODES=${NUM_NODES:-1}
@@ -44,6 +48,7 @@ USE_COMPILE=${USE_COMPILE:-1}
 
 DEBUG=${DEBUG:-1}
 DETER_MODE=${DETER_MODE:-1} # deter mode for precision alignment
+MODEL_SIZE=${MODEL_SIZE:-0.25B}
 
 DISTRIBUTED_ARGS="\
   --nnodes=$NUM_NODES \
@@ -53,10 +58,10 @@ DISTRIBUTED_ARGS="\
   --master_port=$MASTER_PORT \
 "
 
-EXP_NAME="debug_gpt_0.25b"
+EXP_NAME=${EXP_NAME:-"debug_gpt_${MODEL_SIZE}"}
 TRAINING_ARGS="\
   --exp_name $EXP_NAME \
-  --seed 1337 \
+  --seed $SEED \
   --dataset_path ... \
   --use_mock_data \
   --mock_data_num_samples 12800 \
@@ -88,16 +93,56 @@ PARALLELISM_ARGS="\
   --use_distributed_optimizer \
 "
 
-MODEL_ARGS="\
-  --block_size 4096 \
-  --vocab_size 50304 \
-  --num_layer 12 \
-  --num_attention_heads 32 \
-  --num_key_value_heads 4 \
-  --hidden_size 1024 \
-  --intermediate_size 4096 \
-  --tied_lm_head \
-  --dropout 0.0 \
-"
+case $MODEL_SIZE in
+    "0.25B"|"0.25b"|"dense-0.25B"|"dense-0.25b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 12 \
+          --num_attention_heads 32 \
+          --num_key_value_heads 4 \
+          --hidden_size 1024 \
+          --intermediate_size 4096 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "1.3B"|"1.3b"|"dense-1.3B"|"dense-1.3b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 24 \
+          --num_attention_heads 16 \
+          --num_key_value_heads 8 \
+          --hidden_size 2048 \
+          --intermediate_size 6144 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "0.3B-A0.17B"|"0.3b_a0.17b"|"moe-0.3B-A0.17B"|"moe-0.3b-a0.17b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 12 \
+          --num_attention_heads 32 \
+          --num_key_value_heads 4 \
+          --hidden_size 768 \
+          --intermediate_size 3072 \
+          --tied_lm_head \
+          --dropout 0.0 \
+          --use_moe \
+          --num_experts 8 \
+          --num_experts_per_tok 2 \
+          --moe_intermediate_size 768 \
+        "
+        ;;
+    *)
+        echo "Unknown MODEL_SIZE: $MODEL_SIZE" >&2
+        echo "Supported MODEL_SIZE values: 0.25B, 1.3B, 0.3B-A0.17B" >&2
+        exit 1
+        ;;
+esac
 
-torchrun $DISTRIBUTED_ARGS pretrain_debug.py $TRAINING_ARGS $PARALLELISM_ARGS $MODEL_ARGS
+
+torchrun $DISTRIBUTED_ARGS scripts/debug/pretrain.py $TRAINING_ARGS $PARALLELISM_ARGS $MODEL_ARGS

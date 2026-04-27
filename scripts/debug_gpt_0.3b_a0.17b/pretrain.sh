@@ -19,6 +19,10 @@
 
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+cd "$REPO_ROOT"
+
 # Multi-node config (can be overridden by environment variables)
 NUM_NODES=${NUM_NODES:-1}
 NUM_GPUS=${NUM_GPUS:-8}
@@ -101,4 +105,4 @@ MODEL_ARGS="\
   --moe_intermediate_size 768 \
 "
 
-torchrun $DISTRIBUTED_ARGS pretrain_debug.py $TRAINING_ARGS $PARALLELISM_ARGS $MODEL_ARGS
+torchrun $DISTRIBUTED_ARGS scripts/debug/pretrain.py $TRAINING_ARGS $PARALLELISM_ARGS $MODEL_ARGS

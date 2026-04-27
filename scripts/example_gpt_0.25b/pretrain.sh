@@ -12,9 +12,9 @@
 #
 # Example for 2 nodes:
 #   Node 0 (master, IP: 192.168.1.100):
-#     NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 bash scripts/debug_gpt_0.25b/pretrain.sh
+#     NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 bash scripts/example_gpt_0.25b/pretrain.sh
 #   Node 1:
-#     NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 bash scripts/debug_gpt_0.25b/pretrain.sh
+#     NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 bash scripts/example_gpt_0.25b/pretrain.sh
 #
 
 # Multi-node configuration (can be overridden by environment variables)
