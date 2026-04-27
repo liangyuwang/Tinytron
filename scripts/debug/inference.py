@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 import torch
 import torch.distributed as dist
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from tinytron.model.config import ModelConfig, build_model_config
 from tinytron.training.config import ParallelConfig
