@@ -56,11 +56,10 @@ DISTRIBUTED_ARGS="\
   --master_port=$MASTER_PORT \
 "
 
-EXP_NAME=${EXP_NAME:-"example_gpt_${MODEL_SIZE}"}
+LOG_DIR=${LOG_DIR:-"$SCRIPT_DIR/example_gpt_${MODEL_SIZE}"}
 TRAINING_ARGS="\
-  --exp_name $EXP_NAME \
   --seed $SEED \
-  --log_dir ./log \
+  --log_dir $LOG_DIR \
   --total_batch_size $TOTAL_BATCH_SIZE \
   --batch_size $BATCH_SIZE_PER_DP_RANK \
   --seq_len $SEQ_LEN \

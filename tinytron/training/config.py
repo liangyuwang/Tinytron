@@ -59,7 +59,6 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class LoggingConfig:
-    exp_name: str = "gpt"
     log_dir: str = "./log/"
     log_every: int = 10
     print_config: bool = False
@@ -111,7 +110,6 @@ class ParallelConfig:
 
 def build_config(args: argparse.Namespace) -> Config:
     logging_cfg = LoggingConfig(
-        exp_name=args.exp_name,
         log_dir=args.log_dir,
         log_every=args.log_every,
         print_config=getattr(args, "print_config", False),

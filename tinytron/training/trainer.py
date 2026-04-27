@@ -218,7 +218,6 @@ class Trainer:
         # create the log directory we will write checkpoints to and log to
         self.log_dir = os.path.join(
             config.logging.log_dir,
-            f"{config.logging.exp_name}_"
             f"modelsize_{sum(p.numel() for p in self.raw_model.parameters())}_"
             f"lr{config.optim.max_lr}_"
             f"BS{config.train.batch_size}_"

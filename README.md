@@ -125,7 +125,6 @@ MODEL_SIZE=7B bash scripts/debug/pretrain.sh
 
 ```bash
 torchrun --nproc_per_node=8 scripts/debug/pretrain.py \
-  --exp_name debug_test \
   --use_mock_data \
   --mock_data_num_samples 1280 \
   --total_batch_size 524288 \
@@ -278,7 +277,6 @@ Key CLI options (see `tinytron/training/arguments.py` for full list):
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--exp_name` | `gpt` | Experiment name |
 | `--total_batch_size` | `524288` | Global batch size in tokens |
 | `--batch_size` | `8` | Micro batch size per device |
 | `--seq_len` | `4096` | Sequence length |
@@ -458,7 +456,7 @@ def _init_optimizer(self, config: Config):
 
 Training logs are saved to:
 ```
-<log_dir>/<exp_name>_modelsize_<...>_lr<...>_BS<...>_SL<...>_DP<...>_SEP<...>/log.txt
+<log_dir>/modelsize_<...>_lr<...>_BS<...>_SL<...>_DP<...>_SEP<...>/log.txt
 ```
 
 Log format:

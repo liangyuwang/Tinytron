@@ -58,14 +58,13 @@ DISTRIBUTED_ARGS="\
   --master_port=$MASTER_PORT \
 "
 
-EXP_NAME=${EXP_NAME:-"debug_gpt_${MODEL_SIZE}"}
+LOG_DIR=${LOG_DIR:-"$SCRIPT_DIR/debug_gpt_${MODEL_SIZE}"}
 TRAINING_ARGS="\
-  --exp_name $EXP_NAME \
   --seed $SEED \
   --dataset_path ... \
   --use_mock_data \
   --mock_data_num_samples 12800 \
-  --log_dir ./log \
+  --log_dir $LOG_DIR \
   --total_batch_size $TOTAL_BATCH_SIZE \
   --batch_size $BATCH_SIZE_PER_DP_RANK \
   --seq_len $SEQ_LEN \

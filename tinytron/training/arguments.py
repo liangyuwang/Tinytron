@@ -54,7 +54,6 @@ def _add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
 
 def _add_logging_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     g = parser.add_argument_group("logging")
-    g.add_argument("--exp_name", type=str, default="gpt")
     g.add_argument("--log_dir", type=str, default="./log/")
     g.add_argument("--log_every", type=int, default=10)
     g.add_argument("--print_config", action="store_true")
