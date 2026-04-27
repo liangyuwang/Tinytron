@@ -94,7 +94,33 @@ PARALLELISM_ARGS="\
 "
 
 case $MODEL_SIZE in
-    "0.25B"|"0.25b"|"dense-0.25B"|"dense-0.25b")
+    "0.03B"|"0.03b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 6 \
+          --num_attention_heads 8 \
+          --num_key_value_heads 2 \
+          --hidden_size 512 \
+          --intermediate_size 2048 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "0.1B"|"0.1b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 12 \
+          --num_attention_heads 16 \
+          --num_key_value_heads 4 \
+          --hidden_size 768 \
+          --intermediate_size 3072 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "0.25B"|"0.25b")
         MODEL_ARGS="\
           --block_size 4096 \
           --vocab_size 50304 \
@@ -107,7 +133,20 @@ case $MODEL_SIZE in
           --dropout 0.0 \
         "
         ;;
-    "1.3B"|"1.3b"|"dense-1.3B"|"dense-1.3b")
+    "1B"|"1b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 24 \
+          --num_attention_heads 64 \
+          --num_key_value_heads 8 \
+          --hidden_size 2048 \
+          --intermediate_size 8192 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "1.3B"|"1.3b")
         MODEL_ARGS="\
           --block_size 4096 \
           --vocab_size 50304 \
@@ -120,7 +159,76 @@ case $MODEL_SIZE in
           --dropout 0.0 \
         "
         ;;
-    "0.3B-A0.17B"|"0.3b_a0.17b"|"moe-0.3B-A0.17B"|"moe-0.3b-a0.17b")
+    "7B"|"7b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 32 \
+          --num_attention_heads 128 \
+          --num_key_value_heads 16 \
+          --hidden_size 4096 \
+          --intermediate_size 16384 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "13B"|"13b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 40 \
+          --num_attention_heads 40 \
+          --num_key_value_heads 8 \
+          --hidden_size 5120 \
+          --intermediate_size 13824 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "30B"|"30b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 60 \
+          --num_attention_heads 52 \
+          --num_key_value_heads 8 \
+          --hidden_size 6656 \
+          --intermediate_size 17920 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "70B"|"70b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 80 \
+          --num_attention_heads 64 \
+          --num_key_value_heads 8 \
+          --hidden_size 8192 \
+          --intermediate_size 28672 \
+          --tied_lm_head \
+          --dropout 0.0 \
+        "
+        ;;
+    "0.17B-A0.1B"|"0.17b-a0.1b"|"0.17b_a0.1b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 12 \
+          --num_attention_heads 16 \
+          --num_key_value_heads 4 \
+          --hidden_size 768 \
+          --intermediate_size 3072 \
+          --tied_lm_head \
+          --dropout 0.0 \
+          --use_moe \
+          --num_experts 8 \
+          --num_experts_per_tok 2 \
+          --moe_intermediate_size 768 \
+        "
+        ;;
+    "0.3B-A0.17B"|"0.3b-a0.17b"|"0.3b_a0.17b")
         MODEL_ARGS="\
           --block_size 4096 \
           --vocab_size 50304 \
@@ -137,9 +245,77 @@ case $MODEL_SIZE in
           --moe_intermediate_size 768 \
         "
         ;;
+    "0.7B-A0.25B"|"0.7b-a0.25b"|"0.7b_a0.25b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 24 \
+          --num_attention_heads 32 \
+          --num_key_value_heads 4 \
+          --hidden_size 1024 \
+          --intermediate_size 4096 \
+          --tied_lm_head \
+          --dropout 0.0 \
+          --use_moe \
+          --num_experts 8 \
+          --num_experts_per_tok 2 \
+          --moe_intermediate_size 1024 \
+        "
+        ;;
+    "2.7B-A1B"|"2.7b-a1b"|"2.7b_a1b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 24 \
+          --num_attention_heads 64 \
+          --num_key_value_heads 8 \
+          --hidden_size 2048 \
+          --intermediate_size 8192 \
+          --tied_lm_head \
+          --dropout 0.0 \
+          --use_moe \
+          --num_experts 8 \
+          --num_experts_per_tok 2 \
+          --moe_intermediate_size 2048 \
+        "
+        ;;
+    "14B-A4.5B"|"14b-a4.5b"|"14b_a4.5b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 32 \
+          --num_attention_heads 128 \
+          --num_key_value_heads 16 \
+          --hidden_size 4096 \
+          --intermediate_size 16384 \
+          --tied_lm_head \
+          --dropout 0.0 \
+          --use_moe \
+          --num_experts 8 \
+          --num_experts_per_tok 2 \
+          --moe_intermediate_size 4096 \
+        "
+        ;;
+    "104B-A4.5B"|"104b-a4.5b"|"104b_a4.5b")
+        MODEL_ARGS="\
+          --block_size 4096 \
+          --vocab_size 50304 \
+          --num_layer 32 \
+          --num_attention_heads 128 \
+          --num_key_value_heads 16 \
+          --hidden_size 4096 \
+          --intermediate_size 16384 \
+          --tied_lm_head \
+          --dropout 0.0 \
+          --use_moe \
+          --num_experts 64 \
+          --num_experts_per_tok 2 \
+          --moe_intermediate_size 4096 \
+        "
+        ;;
     *)
         echo "Unknown MODEL_SIZE: $MODEL_SIZE" >&2
-        echo "Supported MODEL_SIZE values: 0.25B, 1.3B, 0.3B-A0.17B" >&2
+        echo "Supported MODEL_SIZE values: 0.03B, 0.1B, 0.25B, 1B, 1.3B, 7B, 13B, 30B, 70B, 0.17B-A0.1B, 0.3B-A0.17B, 0.7B-A0.25B, 2.7B-A1B, 14B-A4.5B, 104B-A4.5B" >&2
         exit 1
         ;;
 esac

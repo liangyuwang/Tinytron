@@ -7,18 +7,28 @@ set -euo pipefail
 #   # 1) smoke test with random weights
 #   bash scripts/debug/inference.sh
 #
-#   # 2) run checkpoint inference with a small preset
-#   MODEL_SIZE=small CKPT_PATH=./log/debug_gpt_0.25b/00500_model.pt \
+#   # 2) run checkpoint inference with a 0.1B preset
+#   MODEL_SIZE=0.1B CKPT_PATH=./log/debug_gpt_0.25b/00500_model.pt \
 #   bash scripts/debug/inference.sh
 #
 # Preset model sizes:
-#   tiny   : 6L,  8QH,  2KVH, hidden=512,  ffn=2048
-#   small  : 12L, 16QH, 4KVH, hidden=768,  ffn=3072
-#   base   : 12L, 32QH, 4KVH, hidden=1024, ffn=4096
-#   large  : 24L, 32QH, 8KVH, hidden=2048, ffn=8192
-#   moe-sm : small + MoE(8 experts, top-2, expert_ffn=768)
+#   0.03B           : 6L,  8QH,   2KVH, hidden=512,  ffn=2048
+#   0.1B            : 12L, 16QH,  4KVH, hidden=768,  ffn=3072
+#   0.25B           : 12L, 32QH,  4KVH, hidden=1024, ffn=4096
+#   1B              : 24L, 64QH,  8KVH, hidden=2048, ffn=8192
+#   1.3B            : 24L, 16QH,  8KVH, hidden=2048, ffn=6144
+#   7B              : 32L, 128QH, 16KVH, hidden=4096, ffn=16384
+#   13B             : 40L, 40QH,  8KVH, hidden=5120, ffn=13824
+#   30B             : 60L, 52QH,  8KVH, hidden=6656, ffn=17920
+#   70B             : 80L, 64QH,  8KVH, hidden=8192, ffn=28672
+#   0.17B-A0.1B     : 12L, 16QH, 4KVH, hidden=768, ffn=3072 + MoE
+#   0.3B-A0.17B     : 12L, 32QH, 4KVH, hidden=768, ffn=3072 + MoE
+#   0.7B-A0.25B     : 24L, 32QH, 4KVH, hidden=1024, ffn=4096 + MoE
+#   2.7B-A1B        : 24L, 64QH, 8KVH, hidden=2048, ffn=8192 + MoE
+#   14B-A4.5B       : 32L, 128QH, 16KVH, hidden=4096, ffn=16384 + MoE
+#   104B-A4.5B      : 14B-A4.5B with 64 experts
 
-MODEL_SIZE=${MODEL_SIZE:-base}
+MODEL_SIZE=${MODEL_SIZE:-0.25B}
 CKPT_PATH=${CKPT_PATH:-}
 PROMPT_TOKEN_IDS=${PROMPT_TOKEN_IDS:-1,2,3,4}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-16}
@@ -37,7 +47,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 cd "$REPO_ROOT"
 
-# defaults (base)
+# defaults (0.25B)
 NUM_LAYER=12
 NUM_ATTENTION_HEADS=32
 NUM_KEY_VALUE_HEADS=4
@@ -49,30 +59,65 @@ NUM_EXPERTS_PER_TOK=2
 MOE_INTERMEDIATE_SIZE=768
 
 case "${MODEL_SIZE}" in
-  tiny)
+  0.03B|0.03b)
     NUM_LAYER=6
     NUM_ATTENTION_HEADS=8
     NUM_KEY_VALUE_HEADS=2
     HIDDEN_SIZE=512
     INTERMEDIATE_SIZE=2048
     ;;
-  small)
+  0.1B|0.1b)
     NUM_LAYER=12
     NUM_ATTENTION_HEADS=16
     NUM_KEY_VALUE_HEADS=4
     HIDDEN_SIZE=768
     INTERMEDIATE_SIZE=3072
     ;;
-  base)
+  0.25B|0.25b)
     ;;
-  large)
+  1B|1b)
     NUM_LAYER=24
-    NUM_ATTENTION_HEADS=32
+    NUM_ATTENTION_HEADS=64
     NUM_KEY_VALUE_HEADS=8
     HIDDEN_SIZE=2048
     INTERMEDIATE_SIZE=8192
     ;;
-  moe-sm)
+  1.3B|1.3b)
+    NUM_LAYER=24
+    NUM_ATTENTION_HEADS=16
+    NUM_KEY_VALUE_HEADS=8
+    HIDDEN_SIZE=2048
+    INTERMEDIATE_SIZE=6144
+    ;;
+  7B|7b)
+    NUM_LAYER=32
+    NUM_ATTENTION_HEADS=128
+    NUM_KEY_VALUE_HEADS=16
+    HIDDEN_SIZE=4096
+    INTERMEDIATE_SIZE=16384
+    ;;
+  13B|13b)
+    NUM_LAYER=40
+    NUM_ATTENTION_HEADS=40
+    NUM_KEY_VALUE_HEADS=8
+    HIDDEN_SIZE=5120
+    INTERMEDIATE_SIZE=13824
+    ;;
+  30B|30b)
+    NUM_LAYER=60
+    NUM_ATTENTION_HEADS=52
+    NUM_KEY_VALUE_HEADS=8
+    HIDDEN_SIZE=6656
+    INTERMEDIATE_SIZE=17920
+    ;;
+  70B|70b)
+    NUM_LAYER=80
+    NUM_ATTENTION_HEADS=64
+    NUM_KEY_VALUE_HEADS=8
+    HIDDEN_SIZE=8192
+    INTERMEDIATE_SIZE=28672
+    ;;
+  0.17B-A0.1B|0.17b-a0.1b|0.17b_a0.1b)
     NUM_LAYER=12
     NUM_ATTENTION_HEADS=16
     NUM_KEY_VALUE_HEADS=4
@@ -80,8 +125,53 @@ case "${MODEL_SIZE}" in
     INTERMEDIATE_SIZE=3072
     USE_MOE=1
     ;;
+  0.3B-A0.17B|0.3b-a0.17b|0.3b_a0.17b)
+    NUM_LAYER=12
+    NUM_ATTENTION_HEADS=32
+    NUM_KEY_VALUE_HEADS=4
+    HIDDEN_SIZE=768
+    INTERMEDIATE_SIZE=3072
+    USE_MOE=1
+    ;;
+  0.7B-A0.25B|0.7b-a0.25b|0.7b_a0.25b)
+    NUM_LAYER=24
+    NUM_ATTENTION_HEADS=32
+    NUM_KEY_VALUE_HEADS=4
+    HIDDEN_SIZE=1024
+    INTERMEDIATE_SIZE=4096
+    USE_MOE=1
+    MOE_INTERMEDIATE_SIZE=1024
+    ;;
+  2.7B-A1B|2.7b-a1b|2.7b_a1b)
+    NUM_LAYER=24
+    NUM_ATTENTION_HEADS=64
+    NUM_KEY_VALUE_HEADS=8
+    HIDDEN_SIZE=2048
+    INTERMEDIATE_SIZE=8192
+    USE_MOE=1
+    MOE_INTERMEDIATE_SIZE=2048
+    ;;
+  14B-A4.5B|14b-a4.5b|14b_a4.5b)
+    NUM_LAYER=32
+    NUM_ATTENTION_HEADS=128
+    NUM_KEY_VALUE_HEADS=16
+    HIDDEN_SIZE=4096
+    INTERMEDIATE_SIZE=16384
+    USE_MOE=1
+    MOE_INTERMEDIATE_SIZE=4096
+    ;;
+  104B-A4.5B|104b-a4.5b|104b_a4.5b)
+    NUM_LAYER=32
+    NUM_ATTENTION_HEADS=128
+    NUM_KEY_VALUE_HEADS=16
+    HIDDEN_SIZE=4096
+    INTERMEDIATE_SIZE=16384
+    USE_MOE=1
+    NUM_EXPERTS=64
+    MOE_INTERMEDIATE_SIZE=4096
+    ;;
   *)
-    echo "Unknown MODEL_SIZE='${MODEL_SIZE}'. Use one of: tiny, small, base, large, moe-sm"
+    echo "Unknown MODEL_SIZE='${MODEL_SIZE}'. Use one of: 0.03B, 0.1B, 0.25B, 1B, 1.3B, 7B, 13B, 30B, 70B, 0.17B-A0.1B, 0.3B-A0.17B, 0.7B-A0.25B, 2.7B-A1B, 14B-A4.5B, 104B-A4.5B"
     exit 1
     ;;
 esac

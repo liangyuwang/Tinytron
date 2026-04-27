@@ -116,6 +116,9 @@ bash scripts/debug_gpt_0.3b_a0.17b/pretrain.sh
 
 # Override SEP (sequence-expert joint) parallel size
 SEP_SIZE=2 bash scripts/debug/pretrain.sh
+
+# Override model size preset
+MODEL_SIZE=7B bash scripts/debug/pretrain.sh
 ```
 
 **Direct command for quick testing:**
@@ -218,9 +221,9 @@ Notes:
 - Sampling is synchronized within each SEP group so all ranks advance with the same next token.
 - Output is printed as comma-separated token ids.
 - `scripts/debug/inference.py` also prints prefill/decode throughput (`tok/s`) for quick performance checks.
-- Use `scripts/debug/inference.sh` for a one-command debug launch with model-size presets (`tiny`, `small`, `base`, `large`, `moe-sm`).
+- Use `scripts/debug/inference.sh` for a one-command debug launch with model-size presets (`0.03B`, `0.1B`, `0.25B`, `1B`, `1.3B`, `7B`, `13B`, `30B`, `70B`, `0.17B-A0.1B`, `0.3B-A0.17B`, `0.7B-A0.25B`, `2.7B-A1B`, `14B-A4.5B`, `104B-A4.5B`).
 - `SEP_SIZE=<n>` makes the debug script switch to `torchrun --nproc_per_node <n>`.
-- `MODEL_SIZE=moe-sm` can run in single-process inference mode (no `init_process_group`) with EP fallback to 1.
+- MoE presets such as `MODEL_SIZE=0.17B-A0.1B` can run in single-process inference mode (no `init_process_group`) with EP fallback to 1.
 
 Smoke test without a checkpoint (random initialized weights):
 
@@ -239,7 +242,7 @@ Or use the debug script:
 bash scripts/debug/inference.sh
 
 # Checkpoint run with a preset size
-MODEL_SIZE=small CKPT_PATH=./log/debug_gpt_0.25B/00500_model.pt \
+MODEL_SIZE=0.1B CKPT_PATH=./log/debug_gpt_0.25B/00500_model.pt \
 bash scripts/debug/inference.sh
 ```
 
