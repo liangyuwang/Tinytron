@@ -50,21 +50,29 @@ class ExpertLoadBalancingLoss(nn.Module):
         self.top_k = top_k
         self.alpha = alpha
 
-    def forward(self, gate_logits: torch.Tensor) -> torch.Tensor:
+    def forward(self, gate_logits: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
         flat_logits = gate_logits.view(-1, self.num_experts)
+        if valid_mask is not None:
+            flat_logits = flat_logits[valid_mask.view(-1).bool()]
         local_tokens = flat_logits.size(0)
 
-        routing_probs = F.softmax(flat_logits, dim=-1)
-        local_P_i_sum = routing_probs.sum(dim=0)  # [num_experts]
+        if local_tokens == 0:
+            local_P_i_sum = gate_logits.new_zeros(self.num_experts)
+            local_f_i_sum = gate_logits.new_zeros(self.num_experts)
+        else:
+            routing_probs = F.softmax(flat_logits, dim=-1)
+            local_P_i_sum = routing_probs.sum(dim=0)  # [num_experts]
 
-        _, selected_experts = torch.topk(flat_logits, self.top_k, dim=-1) # [local_tokens, top_k]
-        expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).float()
-        local_f_i_sum = expert_mask.sum(dim=[0, 1])
+            _, selected_experts = torch.topk(flat_logits, self.top_k, dim=-1) # [local_tokens, top_k]
+            expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).float()
+            local_f_i_sum = expert_mask.sum(dim=[0, 1])
 
         stats = torch.cat([local_P_i_sum, local_f_i_sum])
         dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=parallel_state.get_ep_group())
         global_P_i_sum, global_f_i_sum = stats.chunk(2)
-        global_tokens = local_tokens * parallel_state.get_ep_world_size()
+        global_tokens = torch.tensor(float(local_tokens), device=gate_logits.device)
+        dist.all_reduce(global_tokens, op=dist.ReduceOp.SUM, group=parallel_state.get_ep_group())
+        global_tokens = global_tokens.clamp(min=1.0)
 
         P_i = global_P_i_sum / global_tokens
         f_i = global_f_i_sum / (global_tokens * self.top_k)

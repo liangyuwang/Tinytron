@@ -102,7 +102,7 @@ class GPT(nn.Module):
                 layer_past = past_key_values[layer_idx] if past_key_values is not None else None
             x, gate_logits, new_kv = block(x, past_kv=layer_past, use_cache=use_cache, position_offset=position_offset)
             if self.expert_loss_fn is not None and gate_logits is not None and targets is not None:
-                total_aux_loss += self.expert_loss_fn(gate_logits)
+                total_aux_loss += self.expert_loss_fn(gate_logits, valid_mask=(targets != self.loss_fn.ignore_index))
             if use_cache and paged_cache is None:
                 new_past_key_values.append(new_kv)
         x = self.lnf(x)
