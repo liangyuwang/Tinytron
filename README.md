@@ -42,6 +42,7 @@ Good research fits include:
   - Model FLOPs Utilization (MFU) tracking
   - PyTorch profiler integration
   - Auto-tune script for throughput search (`scripts/autotune.sh`)
+  - RL primitives for rollout batches, response masks, token logprobs, DPO, PPO-style, and GRPO-style losses
 
 - **Fast iteration paths**:
   - Mock data mode for rapid debugging
@@ -90,6 +91,13 @@ For AI-assisted research workflows, see `research-skills/tinytron-research/`. It
 │   │   ├── config.py                       # Config dataclasses (ModelConfig, etc.)
 │   │   ├── arguments.py                    # CLI argument definitions
 │   │   └── trainer.py                      # Trainer and dataset init
+│   │
+│   ├── rl/                                 # RL training primitives
+│   │   ├── __init__.py
+│   │   ├── logprobs.py                     # Token logprob and response-mask helpers
+│   │   ├── losses.py                       # DPO / PPO-style / GRPO-style losses
+│   │   ├── rollout.py                      # Rollout batch helpers
+│   │   └── types.py                        # Lightweight RL dataclasses
 │   │
 │   ├── bridge/                             # Parameter-layout bridge infrastructure
 │   │   ├── layout.py                       # Layout, placement, and shard metadata
