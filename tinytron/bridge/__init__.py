@@ -20,13 +20,17 @@ __all__ = [
     "LayoutIndex",
     "LayoutPlanner",
     "LocalCopyRoute",
+    "local_training_state_dict_to_local_inference",
+    "localize_layout",
     "Placement",
     "RankCoord",
     "RoutedMaterializer",
     "ShardSpec",
     "SliceSpec",
     "FileTensorStore",
+    "StateDictShardFileStore",
     "StateDictTensorStore",
+    "state_dict_to_local_inference",
     "TensorMove",
     "TensorRoute",
     "TensorStore",
@@ -37,10 +41,8 @@ __all__ = [
     "bridge_metadata",
     "canonical_state_dict_to_local_inference",
     "canonical_state_dict_to_local_training",
-    "checkpoint_meta_path",
-    "checkpoint_model_paths",
     "current_tinytron_parallel_spec",
-    "export_tinytron_training_state_dict_to_canonical",
+    "current_tinytron_placement",
 ]
 
 
@@ -54,11 +56,12 @@ def __getattr__(name: str):
             "RoutedMaterializer": RoutedMaterializer,
             "TensorRoute": TensorRoute,
         }[name]
-    if name in {"FileTensorStore", "StateDictTensorStore", "TensorStore"}:
-        from .stores import FileTensorStore, StateDictTensorStore, TensorStore
+    if name in {"FileTensorStore", "StateDictShardFileStore", "StateDictTensorStore", "TensorStore"}:
+        from .stores import FileTensorStore, StateDictShardFileStore, StateDictTensorStore, TensorStore
 
         return {
             "FileTensorStore": FileTensorStore,
+            "StateDictShardFileStore": StateDictShardFileStore,
             "StateDictTensorStore": StateDictTensorStore,
             "TensorStore": TensorStore,
         }[name]
@@ -66,28 +69,31 @@ def __getattr__(name: str):
         "bridge_metadata",
         "canonical_state_dict_to_local_inference",
         "canonical_state_dict_to_local_training",
-        "checkpoint_meta_path",
-        "checkpoint_model_paths",
         "current_tinytron_parallel_spec",
-        "export_tinytron_training_state_dict_to_canonical",
+        "current_tinytron_placement",
+        "local_training_state_dict_to_local_inference",
+        "localize_layout",
+        "state_dict_to_local_inference",
     }:
         from .model import (
             bridge_metadata,
             canonical_state_dict_to_local_inference,
             canonical_state_dict_to_local_training,
-            checkpoint_meta_path,
-            checkpoint_model_paths,
             current_tinytron_parallel_spec,
-            export_tinytron_training_state_dict_to_canonical,
+            current_tinytron_placement,
+            local_training_state_dict_to_local_inference,
+            localize_layout,
+            state_dict_to_local_inference,
         )
 
         return {
             "bridge_metadata": bridge_metadata,
             "canonical_state_dict_to_local_inference": canonical_state_dict_to_local_inference,
             "canonical_state_dict_to_local_training": canonical_state_dict_to_local_training,
-            "checkpoint_meta_path": checkpoint_meta_path,
-            "checkpoint_model_paths": checkpoint_model_paths,
             "current_tinytron_parallel_spec": current_tinytron_parallel_spec,
-            "export_tinytron_training_state_dict_to_canonical": export_tinytron_training_state_dict_to_canonical,
+            "current_tinytron_placement": current_tinytron_placement,
+            "local_training_state_dict_to_local_inference": local_training_state_dict_to_local_inference,
+            "localize_layout": localize_layout,
+            "state_dict_to_local_inference": state_dict_to_local_inference,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

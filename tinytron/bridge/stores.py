@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 import base64
 
 import torch
@@ -137,3 +137,54 @@ class FileTensorStore:
         placement_token = base64.urlsafe_b64encode(placement_key).decode("ascii").rstrip("=")
         param_token = shard.param_name.replace("/", "_").replace(".", "__")
         return self.root / f"{placement_token}--{param_token}.pt"
+
+
+class StateDictShardFileStore:
+    """Read tensor shards from per-placement state_dict files."""
+
+    def __init__(
+        self,
+        path_for_placement: Callable[[Placement], str | Path],
+        map_location: str | torch.device = "cpu",
+        cache: bool = True,
+    ):
+        self.path_for_placement = path_for_placement
+        self.map_location = map_location
+        self.cache = cache
+        self._state_dict_cache: dict[Placement, dict[str, torch.Tensor]] = {}
+
+    def read(
+        self,
+        shard: ShardSpec,
+        local_slices: tuple[SliceSpec, ...] | None = None,
+    ) -> torch.Tensor:
+        state_dict = self._state_dict_for(shard.placement)
+        try:
+            tensor = state_dict[shard.param_name]
+        except KeyError as exc:
+            raise KeyError(f"missing tensor {shard.param_name!r} at placement {shard.placement}") from exc
+        if tuple(tensor.shape) != shard.local_shape:
+            raise ValueError(
+                f"stored tensor shape mismatch for {shard.param_name!r} at {shard.placement}: "
+                f"got {tuple(tensor.shape)}, expected {shard.local_shape}"
+            )
+        if local_slices is None:
+            return tensor
+        return tensor[to_torch_slices(local_slices)]
+
+    def write(
+        self,
+        shard: ShardSpec,
+        tensor: torch.Tensor,
+        local_slices: tuple[SliceSpec, ...] | None = None,
+    ) -> None:
+        raise NotImplementedError("StateDictShardFileStore is read-only")
+
+    def _state_dict_for(self, placement: Placement) -> dict[str, torch.Tensor]:
+        if self.cache and placement in self._state_dict_cache:
+            return self._state_dict_cache[placement]
+        path = Path(self.path_for_placement(placement))
+        state_dict = torch.load(path, map_location=self.map_location, weights_only=True)
+        if self.cache:
+            self._state_dict_cache[placement] = state_dict
+        return state_dict

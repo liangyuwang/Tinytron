@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import asdict
 
 import torch
@@ -26,25 +25,6 @@ EXPERT_PARAM_SUFFIXES = (
     ".mlp.experts_up_weights",
     ".mlp.experts_down_weights",
 )
-
-
-def checkpoint_model_paths(model_path: str) -> tuple[str, str | None]:
-    if model_path.endswith("_model_canonical.pt"):
-        prefix = model_path.removesuffix("_model_canonical.pt")
-        return model_path, f"{prefix}_model.pt"
-    if model_path.endswith("_model.pt"):
-        prefix = model_path.removesuffix("_model.pt")
-        canonical_path = f"{prefix}_model_canonical.pt"
-        return canonical_path if os.path.exists(canonical_path) else model_path, model_path
-    return model_path, None
-
-
-def checkpoint_meta_path(model_path: str) -> str:
-    if model_path.endswith("_model_canonical.pt"):
-        return f"{model_path.removesuffix('_model_canonical.pt')}_meta.pt"
-    if model_path.endswith("_model.pt"):
-        return f"{model_path.removesuffix('_model.pt')}_meta.pt"
-    return model_path.replace("_model.pt", "_meta.pt")
 
 
 def current_tinytron_parallel_spec(system: str) -> ParallelSpec:
@@ -114,6 +94,39 @@ def canonical_state_dict_to_local_inference(
     )
 
 
+def state_dict_to_local_inference(
+    state_dict: dict[str, torch.Tensor],
+    model_config: ModelConfig,
+) -> dict[str, torch.Tensor]:
+    if _looks_like_local_training_state_dict(state_dict, model_config):
+        return local_training_state_dict_to_local_inference(state_dict, model_config)
+    return canonical_state_dict_to_local_inference(state_dict, model_config)
+
+
+def local_training_state_dict_to_local_inference(
+    state_dict: dict[str, torch.Tensor],
+    model_config: ModelConfig,
+) -> dict[str, torch.Tensor]:
+    if not _needs_inference_bridge(state_dict, model_config):
+        return state_dict
+
+    parallel = current_tinytron_parallel_spec(system="training")
+    src_layout = build_tinytron_training_layout(model_config=model_config, parallel=parallel)
+    src_placement = current_tinytron_placement(src_layout)
+    dst_layout = build_tinytron_inference_layout(
+        model_config=model_config,
+        parallel=current_tinytron_parallel_spec(system="inference"),
+        shard_qkv=model_config.inference_shard_qkv,
+    )
+    dst_placement = current_tinytron_placement(dst_layout)
+    return _materialize_local_state_dict(
+        src_state_dict=state_dict,
+        src_layout=localize_layout(src_layout, src_placement),
+        dst_layout=localize_layout(dst_layout, dst_placement),
+        dst_placement=dst_placement,
+    )
+
+
 def canonical_state_dict_to_local_training(
     state_dict: dict[str, torch.Tensor],
     model_config: ModelConfig,
@@ -133,49 +146,6 @@ def canonical_state_dict_to_local_training(
         dst_layout=localize_layout(dst_layout, dst_placement),
         dst_placement=dst_placement,
     )
-
-
-@torch.no_grad()
-def export_tinytron_training_state_dict_to_canonical(
-    model,
-    model_config: ModelConfig,
-) -> dict[str, torch.Tensor] | None:
-    """Export the current training layout to a canonical full state dict.
-
-    Returns the canonical state dict only on global rank 0. Other ranks return
-    None after participating in any required collectives.
-    """
-
-    if not (dist.is_available() and dist.is_initialized()):
-        return {name: tensor.detach().cpu() for name, tensor in model.state_dict().items()}
-
-    try:
-        dp_rank = parallel_state.get_dp_rank()
-        sep_rank = parallel_state.get_sep_rank()
-        sep_world_size = parallel_state.get_sep_world_size()
-        sep_group = parallel_state.get_sep_group()
-    except AssertionError:
-        return {name: tensor.detach().cpu() for name, tensor in model.state_dict().items()} if dist.get_rank() == 0 else None
-
-    if dp_rank != 0:
-        return None
-
-    canonical_state_dict: dict[str, torch.Tensor] | None = {} if sep_rank == 0 else None
-    for name, tensor in model.state_dict().items():
-        local_tensor = tensor.detach().contiguous()
-        if model_config.use_moe and _is_expert_param(name) and sep_world_size > 1:
-            gathered = [torch.empty_like(local_tensor) for _ in range(sep_world_size)]
-            dist.all_gather(gathered, local_tensor, group=sep_group)
-            if sep_rank == 0:
-                assert canonical_state_dict is not None
-                canonical_state_dict[name] = torch.cat(gathered, dim=0).cpu()
-        elif sep_rank == 0:
-            assert canonical_state_dict is not None
-            canonical_state_dict[name] = local_tensor.cpu()
-
-    if dist.get_rank() == 0:
-        return canonical_state_dict
-    return None
 
 
 def _materialize_local_state_dict(
@@ -234,6 +204,23 @@ def _needs_training_bridge(
     expert_key = "blocks.0.mlp.experts_gate_weights"
     weight = state_dict.get(expert_key)
     return weight is not None and weight.size(0) == model_config.num_experts
+
+
+def _looks_like_local_training_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    model_config: ModelConfig,
+) -> bool:
+    if not model_config.use_moe:
+        return False
+    try:
+        sep_size = parallel_state.get_sep_world_size()
+    except AssertionError:
+        sep_size = 1
+    if not sep_size or sep_size <= 1:
+        return False
+    expert_key = "blocks.0.mlp.experts_gate_weights"
+    weight = state_dict.get(expert_key)
+    return weight is not None and weight.size(0) == model_config.num_experts // sep_size
 
 
 def _is_expert_param(name: str) -> bool:

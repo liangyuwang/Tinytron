@@ -15,8 +15,8 @@ from tinytron.model.config import ModelConfig, build_model_config
 from tinytron.training.config import ParallelConfig
 from tinytron.inference import InferenceEngine
 from tinytron.inference.arguments import build_parser, parse_prompt_token_ids
+from tinytron.inference.checkpoint import checkpoint_meta_path, checkpoint_prefix_from_model_path
 from tinytron.distributed import parallel_state
-from tinytron.bridge import checkpoint_meta_path, checkpoint_model_paths
 
 
 def is_distributed_launch() -> bool:
@@ -62,9 +62,9 @@ def destroy_distributed_inference() -> None:
 def load_model_config_from_checkpoint(args) -> ModelConfig:
     model_cfg_dict = None
     if args.checkpoint_path:
-        checkpoint_path, _ = checkpoint_model_paths(args.checkpoint_path)
-        meta_path = checkpoint_meta_path(checkpoint_path)
-        if os.path.exists(meta_path):
+        checkpoint_prefix = checkpoint_prefix_from_model_path(args.checkpoint_path)
+        meta_path = checkpoint_meta_path(checkpoint_prefix) if checkpoint_prefix is not None else None
+        if meta_path is not None and os.path.exists(meta_path):
             meta = torch.load(meta_path, map_location="cpu")
             model_cfg_dict = meta.get("config", {}).get("model")
 
