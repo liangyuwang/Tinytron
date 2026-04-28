@@ -11,6 +11,7 @@ def make_rollout_batch(
     sequences: torch.Tensor,
     old_log_probs: torch.Tensor | None = None,
     eos_token_id: int | None = None,
+    ignore_index: int = -100,
 ) -> RolloutBatch:
     if prompts.dim() != 2 or sequences.dim() != 2:
         raise ValueError("prompts and sequences must be [B, T]")
@@ -20,16 +21,28 @@ def make_rollout_batch(
     if sequences.size(1) < prompt_len:
         raise ValueError("sequences must include the prompt prefix")
     responses = sequences[:, prompt_len:]
-    full_response_mask = build_response_mask(sequences, prompt_len=prompt_len, eos_token_id=eos_token_id)
-    response_mask = full_response_mask[:, prompt_len - 1 :]
-    if old_log_probs is not None and old_log_probs.shape != response_mask.shape:
-        raise ValueError("old_log_probs must be aligned to response tokens")
+    response_mask = build_response_mask(sequences, prompt_len=prompt_len, eos_token_id=eos_token_id)
+    labels = sequences[:, 1:].clone()
+    labels = labels.masked_fill(response_mask == 0, ignore_index)
+    prompt_lens = torch.full((sequences.size(0),), prompt_len, dtype=torch.long, device=sequences.device)
+    response_lens = response_mask[:, prompt_len - 1 :].sum(dim=-1).to(dtype=torch.long)
+
+    old_log_probs_full = None
+    if old_log_probs is not None:
+        response_token_mask = response_mask[:, prompt_len - 1 :]
+        if old_log_probs.shape != response_token_mask.shape:
+            raise ValueError("old_log_probs must be aligned to response tokens")
+        old_log_probs_full = torch.zeros_like(response_mask)
+        old_log_probs_full[:, prompt_len - 1 :] = old_log_probs.to(old_log_probs_full.dtype)
     return RolloutBatch(
         prompts=prompts,
         responses=responses,
         sequences=sequences,
+        labels=labels,
         response_mask=response_mask,
-        old_log_probs=old_log_probs,
+        prompt_lens=prompt_lens,
+        response_lens=response_lens,
+        old_log_probs=old_log_probs_full,
     )
 
 

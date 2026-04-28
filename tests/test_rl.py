@@ -52,7 +52,7 @@ class RLPrimitivesTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(got, torch.tensor([-4.0, -11.0])))
 
-    def test_make_rollout_batch_keeps_response_aligned_fields(self) -> None:
+    def test_make_rollout_batch_uses_varlen_labels(self) -> None:
         import torch
 
         from tinytron.rl import make_rollout_batch
@@ -64,7 +64,25 @@ class RLPrimitivesTest(unittest.TestCase):
         batch = make_rollout_batch(prompts, sequences, old_log_probs=old_log_probs)
 
         self.assertTrue(torch.equal(batch.responses, torch.tensor([[5, 6], [7, 8]])))
-        self.assertEqual(tuple(batch.response_mask.shape), tuple(old_log_probs.shape))
+        self.assertEqual(tuple(batch.labels.shape), (2, 3))
+        self.assertTrue(torch.equal(batch.labels, torch.tensor([[-100, 5, 6], [-100, 7, 8]])))
+        self.assertEqual(tuple(batch.response_mask.shape), tuple(batch.labels.shape))
+        self.assertEqual(tuple(batch.old_log_probs.shape), tuple(batch.labels.shape))
+        self.assertTrue(torch.equal(batch.response_lens, torch.tensor([2, 2])))
+
+    def test_make_rollout_batch_masks_after_eos(self) -> None:
+        import torch
+
+        from tinytron.rl import make_rollout_batch
+
+        prompts = torch.tensor([[1, 2]])
+        sequences = torch.tensor([[1, 2, 5, 6, 7]])
+        old_log_probs = torch.tensor([[-0.1, -0.2, -0.3]])
+
+        batch = make_rollout_batch(prompts, sequences, old_log_probs=old_log_probs, eos_token_id=6)
+
+        self.assertTrue(torch.equal(batch.labels, torch.tensor([[-100, 5, 6, -100]])))
+        self.assertTrue(torch.equal(batch.response_lens, torch.tensor([2])))
 
     def test_dpo_loss_prefers_larger_policy_margin(self) -> None:
         import torch

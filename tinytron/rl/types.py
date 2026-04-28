@@ -14,14 +14,18 @@ class RLLossOutput:
 @dataclass
 class RolloutBatch:
     """
-    response_mask, old_log_probs, reference_log_probs, and advantages are aligned
-    to responses, not to the full prompt+response sequence.
+    labels, response_mask, old_log_probs, and reference_log_probs are aligned
+    to sequences[:, 1:]. Invalid/non-action labels are set to -100, matching
+    Tinytron's variable-length training batch convention.
     """
 
     prompts: torch.Tensor
     responses: torch.Tensor
     sequences: torch.Tensor
+    labels: torch.Tensor
     response_mask: torch.Tensor
+    prompt_lens: torch.Tensor
+    response_lens: torch.Tensor
     old_log_probs: torch.Tensor | None = None
     reference_log_probs: torch.Tensor | None = None
     rewards: torch.Tensor | None = None
