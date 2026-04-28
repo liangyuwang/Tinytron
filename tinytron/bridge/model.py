@@ -10,6 +10,7 @@ from tinytron.distributed import parallel_state
 
 from .layout import LayoutIndex, Placement
 from .materializers import BridgeContext, RoutedMaterializer
+from .materializers import DistributedCopyRoute
 from .planner import LayoutPlanner
 from .rules import (
     ParallelSpec,
@@ -17,7 +18,7 @@ from .rules import (
     build_tinytron_inference_layout,
     build_tinytron_training_layout,
 )
-from .stores import StateDictTensorStore
+from .stores import DistributedStateDictStore, StateDictTensorStore
 
 
 EXPERT_PARAM_SUFFIXES = (
@@ -125,6 +126,35 @@ def local_training_state_dict_to_local_inference(
         dst_layout=localize_layout(dst_layout, dst_placement),
         dst_placement=dst_placement,
     )
+
+
+def distributed_training_state_dict_to_local_inference(
+    state_dict: dict[str, torch.Tensor],
+    model_config: ModelConfig,
+    process_group: dist.ProcessGroup | None = None,
+) -> dict[str, torch.Tensor]:
+    if not (dist.is_available() and dist.is_initialized()):
+        return local_training_state_dict_to_local_inference(state_dict, model_config)
+
+    src_layout = build_tinytron_training_layout(
+        model_config=model_config,
+        parallel=current_tinytron_parallel_spec(system="training"),
+    )
+    dst_layout = build_tinytron_inference_layout(
+        model_config=model_config,
+        parallel=current_tinytron_parallel_spec(system="inference"),
+        shard_qkv=model_config.inference_shard_qkv,
+    )
+    dst_state_dict: dict[str, torch.Tensor] = {}
+    src_store = DistributedStateDictStore(state_dict, process_group=process_group)
+    dst_store = DistributedStateDictStore(dst_state_dict, process_group=process_group)
+    plan = LayoutPlanner().plan(src_layout, dst_layout)
+    rank = dist.get_rank()
+    RoutedMaterializer(routes=[DistributedCopyRoute(rank)]).materialize(
+        plan,
+        BridgeContext(src_store=src_store, dst_store=dst_store),
+    )
+    return dst_state_dict
 
 
 def canonical_state_dict_to_local_training(

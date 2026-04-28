@@ -60,7 +60,9 @@ class LayoutPlanner:
                 overlap = intersect_slices(src_shard.global_slices, dst_shard.global_slices)
                 if overlap is None:
                     continue
-                chosen_by_global_slice.setdefault(overlap, src_shard)
+                current = chosen_by_global_slice.get(overlap)
+                if current is None or self._prefer_source(src_shard, current, dst_shard):
+                    chosen_by_global_slice[overlap] = src_shard
 
             self._validate_coverage(dst_shard, chosen_by_global_slice)
             for global_slice, src_shard in sorted(chosen_by_global_slice.items()):
@@ -102,3 +104,6 @@ class LayoutPlanner:
 
     def _shard_sort_key(self, shard: ShardSpec) -> tuple:
         return (shard.param_name, shard.global_slices, shard.placement.sort_key())
+
+    def _prefer_source(self, candidate: ShardSpec, current: ShardSpec, dst: ShardSpec) -> bool:
+        return candidate.placement.rank == dst.placement.rank and current.placement.rank != dst.placement.rank

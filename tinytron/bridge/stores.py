@@ -5,8 +5,9 @@ from typing import Callable, Protocol
 import base64
 
 import torch
+import torch.distributed as dist
 
-from .layout import Placement, ShardSpec, SliceSpec, to_torch_slices
+from .layout import Placement, ShardSpec, SliceSpec, slice_shape, to_torch_slices
 
 
 class TensorStore(Protocol):
@@ -79,6 +80,97 @@ class StateDictTensorStore:
 
     def state_dict_for(self, placement: Placement) -> dict[str, torch.Tensor]:
         return self.state_dicts.setdefault(placement, {})
+
+
+class DistributedStateDictStore:
+    """Live state-dict store backed by torch.distributed broadcasts."""
+
+    def __init__(
+        self,
+        local_state_dict: dict[str, torch.Tensor] | None = None,
+        process_group: dist.ProcessGroup | None = None,
+        device: torch.device | str | None = None,
+    ):
+        if not (dist.is_available() and dist.is_initialized()):
+            raise RuntimeError("DistributedStateDictStore requires an initialized process group")
+        self.local_state_dict = {} if local_state_dict is None else local_state_dict
+        self.process_group = process_group
+        self.rank = dist.get_rank()
+        self.device = torch.device(device) if device is not None else None
+
+    def read(
+        self,
+        shard: ShardSpec,
+        local_slices: tuple[SliceSpec, ...] | None = None,
+    ) -> torch.Tensor:
+        src_rank = int(shard.placement.rank or 0)
+        if self.rank == src_rank:
+            tensor = self.local_state_dict[shard.param_name]
+            if tuple(tensor.shape) != shard.local_shape:
+                raise ValueError(
+                    f"stored tensor shape mismatch for {shard.param_name!r} at rank {self.rank}: "
+                    f"got {tuple(tensor.shape)}, expected {shard.local_shape}"
+                )
+            if local_slices is not None:
+                tensor = tensor[to_torch_slices(local_slices)]
+            tensor = tensor.contiguous()
+        else:
+            shape = slice_shape(local_slices) if local_slices is not None else shard.local_shape
+            like = self.local_state_dict.get(shard.param_name)
+            if like is None:
+                raise KeyError(f"missing local tensor metadata for {shard.param_name!r}")
+            device = self.device or like.device
+            tensor = torch.empty(shape, dtype=like.dtype, device=device)
+
+        dist.broadcast(tensor, src=src_rank, group=self.process_group)
+        return tensor
+
+    def read_local(
+        self,
+        shard: ShardSpec,
+        local_slices: tuple[SliceSpec, ...] | None = None,
+    ) -> torch.Tensor:
+        tensor = self.local_state_dict[shard.param_name]
+        if tuple(tensor.shape) != shard.local_shape:
+            raise ValueError(
+                f"stored tensor shape mismatch for {shard.param_name!r} at rank {self.rank}: "
+                f"got {tuple(tensor.shape)}, expected {shard.local_shape}"
+            )
+        if local_slices is None:
+            return tensor
+        return tensor[to_torch_slices(local_slices)]
+
+    def write(
+        self,
+        shard: ShardSpec,
+        tensor: torch.Tensor,
+        local_slices: tuple[SliceSpec, ...] | None = None,
+    ) -> None:
+        dst_rank = int(shard.placement.rank or 0)
+        if self.rank != dst_rank:
+            return
+        if local_slices is None:
+            if tuple(tensor.shape) != shard.local_shape:
+                raise ValueError(
+                    f"write shape mismatch for {shard.param_name!r}: "
+                    f"got {tuple(tensor.shape)}, expected {shard.local_shape}"
+                )
+            self.local_state_dict[shard.param_name] = tensor.clone()
+            return
+
+        current = self.local_state_dict.get(shard.param_name)
+        if current is None:
+            current = torch.empty(shard.local_shape, dtype=tensor.dtype, device=tensor.device)
+            self.local_state_dict[shard.param_name] = current
+        if tuple(current.shape) != shard.local_shape:
+            raise ValueError(
+                f"stored tensor shape mismatch for {shard.param_name!r} at rank {self.rank}: "
+                f"got {tuple(current.shape)}, expected {shard.local_shape}"
+            )
+        current[to_torch_slices(local_slices)] = tensor
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return self.local_state_dict
 
 
 class FileTensorStore:

@@ -77,6 +77,24 @@ class BridgeLayoutPlannerTest(unittest.TestCase):
         self.assertEqual([move.global_slices[0] for move in q_moves], [(0, 4), (4, 8)])
         self.assertEqual([move.dst.rank for move in q_moves], [0, 1])
 
+    def test_planner_prefers_same_rank_for_replicated_training_params(self) -> None:
+        cfg = replace(tiny_moe_config(), inference_shard_qkv=True)
+        src = build_tinytron_training_layout(
+            cfg,
+            ParallelSpec(dp_size=1, sep_size=2, system="training"),
+        )
+        dst = build_tinytron_inference_layout(
+            cfg,
+            ParallelSpec(dp_size=1, sep_size=2, system="inference"),
+            shard_qkv=True,
+        )
+
+        plan = LayoutPlanner().plan(src, dst)
+        q_moves = [move for move in plan if move.param_name == "blocks.0.attn.q_proj.weight"]
+
+        self.assertEqual([move.src.rank for move in q_moves], [0, 1])
+        self.assertEqual([move.dst.rank for move in q_moves], [0, 1])
+
     def test_canonical_to_inference_plan_slices_qkv(self) -> None:
         cfg = tiny_moe_config()
         src = build_tinytron_canonical_layout(cfg)
