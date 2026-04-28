@@ -98,6 +98,7 @@ For AI-assisted research workflows, see `research-skills/tinytron-research/`. It
 │   │   ├── losses.py                       # DPO / PPO-style / GRPO-style losses
 │   │   ├── rollout.py                      # Rollout batch helpers
 │   │   ├── sync.py                         # Actor training to rollout model bridge sync
+│   │   ├── trainer.py                      # Minimal synchronous GRPO trainer
 │   │   └── types.py                        # Lightweight RL dataclasses
 │   │
 │   ├── bridge/                             # Parameter-layout bridge infrastructure
@@ -132,6 +133,8 @@ For AI-assisted research workflows, see `research-skills/tinytron-research/`. It
 │   ├── debug/
 │   │   ├── inference.py                    # Debug inference entry (KV cache)
 │   │   ├── inference.sh                    # Inference debug launch script
+│   │   ├── rl.py                           # Debug RL entry (sync rollout + update)
+│   │   ├── rl.sh                           # RL debug launch script
 │   │   ├── pretrain.py                     # Debug entry (mock data, minimal deps)
 │   │   └── pretrain.sh                     # Configurable debug launch script
 │   ├── example/
