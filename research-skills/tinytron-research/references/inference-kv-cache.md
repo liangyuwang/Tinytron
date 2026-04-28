@@ -5,6 +5,7 @@ Use this reference for generation, cache layout, prefill/decode, and inference m
 ## Useful Entry Points
 
 - `tinytron/inference/engine.py`: generation loop, prefill/decode timing, sampling synchronization under SEP.
+- `tinytron/inference/checkpoint.py`: checkpoint loading and bridge-backed model resharding into the current inference layout.
 - `tinytron/inference/cache.py`: paged KV cache allocation, append behavior, layer cache layout.
 - `tinytron/inference/sampler.py`: temperature, top-k, top-p sampling.
 - `tinytron/model/modules/attn.py`: `past_kv` handling, paged cache detection, cache causal mask, SP decode path, QKV sharding.
@@ -35,3 +36,4 @@ Use this reference for generation, cache layout, prefill/decode, and inference m
 - Keep random-weight smoke tests distinct from checkpoint quality tests.
 - For cache layout changes, verify append, retrieval, and causal masking together.
 - Avoid changing sampling behavior when the experiment is only about cache or memory.
+- Treat `tinytron/bridge` as load-time model-state infrastructure. KV-cache and decode experiments should usually stay in inference/model modules, not bridge.

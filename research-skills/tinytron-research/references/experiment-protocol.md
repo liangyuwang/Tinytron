@@ -12,6 +12,7 @@ Record these fields for each run:
 - Variant: only the intentional differences from baseline.
 - Command: exact launch command or script environment variables.
 - Code state: commit SHA or patch summary.
+- Checkpoint/layout state: checkpoint source, SEP size, whether resume used same-layout optimizer restore or model-only reshard.
 - Metrics: loss, validation loss if available, tok/sec, MFU, peak memory if available, prefill/decode tokens/sec for inference.
 - Notes: failures, instability, OOMs, profiler findings, caveats.
 

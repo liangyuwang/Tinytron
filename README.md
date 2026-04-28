@@ -29,6 +29,8 @@ Good research fits include:
   - Sequence-Expert joint parallelism via `SEP_SIZE` / `--sep_size` (SEP)
   - Expert parallel all-to-all communication
   - ZeRO-1 optimizer state partitioning for memory efficiency
+  - Sharded model checkpoints with file-based model resharding across SEP layouts
+  - Bridge utilities for parameter-layout conversion between training and inference
   - Native support for Muon + ZeRO-1
   - Gradient accumulation for large effective batch sizes
   
@@ -78,14 +80,24 @@ For AI-assisted research workflows, see `research-skills/tinytron-research/`. It
 │   ├── inference/                          # Inference helpers
 │   │   ├── arguments.py                    # Inference CLI arguments
 │   │   ├── cache.py                        # KV-cache data structures
+│   │   ├── checkpoint.py                   # Inference checkpoint loading policy
 │   │   ├── engine.py                       # Autoregressive decode engine
 │   │   └── sampler.py                      # Sampling utilities
 │   │
 │   ├── training/                           # Training pipeline
 │   │   ├── __init__.py
+│   │   ├── checkpoint.py                   # Training checkpoint save/load policy
 │   │   ├── config.py                       # Config dataclasses (ModelConfig, etc.)
 │   │   ├── arguments.py                    # CLI argument definitions
 │   │   └── trainer.py                      # Trainer and dataset init
+│   │
+│   ├── bridge/                             # Parameter-layout bridge infrastructure
+│   │   ├── layout.py                       # Layout, placement, and shard metadata
+│   │   ├── planner.py                      # Source/target shard movement planning
+│   │   ├── stores.py                       # State-dict and shard-file tensor stores
+│   │   ├── materializers.py                # Route-based plan materialization
+│   │   ├── rules.py                        # Tinytron model layout rules
+│   │   └── model.py                        # Tinytron model-state layout helpers
 │   │
 │   ├── optim/                              # Optimizer implementations
 │   │   └── muon.py                         # Muon optimizer
@@ -377,11 +389,15 @@ Checkpoint saving is disabled by default. Enable it with:
 ```
 
 When enabled, the trainer can save and resume checkpoints, preserving:
-- Model weights (`*_model.pt`)
+- Model weights (`*_model_rankXXXXX.pt` per-rank shards; `*_model.pt` is a rank-0 legacy compatibility file)
 - Optimizer states (`*_opt/` directory)
 - Training metadata (`*_meta.pt`): step counter, RNG state, dataloader position
 
+Model checkpointing is sharded by rank to avoid gathering MoE experts or other local shards onto rank 0. The metadata records the model layout used for the checkpoint. If you resume with the same layout, Tinytron restores the matching local model shard and optimizer shard. If you resume with a different SEP layout, Tinytron uses the bridge planner plus shard-file reads to rebuild each rank's local model state from the source rank files, and skips optimizer restore because optimizer-state resharding is intentionally not supported.
+
 To resume, restart the same training command. The trainer searches checkpoints under the current `log_dir` by default, or you can specify `--resume_path` explicitly.
+
+Inference loading uses its own checkpoint policy. It can load regular single-file checkpoints or sharded training checkpoints; for sharded checkpoints, each inference rank reads only the source shard slices required by its current inference layout.
 
 ### ZeRO-1 Optimizer
 
@@ -496,6 +512,8 @@ Tinytron is meant to be changed directly. The most common edit points are delibe
 - Optimizer behavior: `tinytron/training/trainer.py`, `tinytron/optim/`, and `tinytron/distributed/zero1/`
 - Data loading: subclass `Trainer` and override `_init_dataset`
 - Launch defaults: `scripts/debug/pretrain.sh` and `scripts/example/pretrain.sh`
+
+`tinytron/bridge` is supporting infrastructure, not a normal research edit surface. It maps parameter layouts across training, inference, and checkpoint shards so experiments can change SEP layouts without centralizing model weights. Prefer changing model, inference, optimizer, or data modules for research work; touch bridge code only when the research question is specifically about parameter layout, checkpoint resharding, or cross-system model-state transfer.
 
 ### Custom Dataset
 
