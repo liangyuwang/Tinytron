@@ -12,7 +12,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 cd "$REPO_ROOT"
 
 NUM_NODES=${NUM_NODES:-1}
-NUM_GPUS=${NUM_GPUS:-1}
+NUM_GPUS=${NUM_GPUS:-8}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-29501}
@@ -24,7 +24,6 @@ BATCH_SIZE=${BATCH_SIZE:-2}
 PROMPT_LEN=${PROMPT_LEN:-17}
 GBS=${GBS:-64}
 TOTAL_BATCH_SIZE=$((GBS * PROMPT_LEN))
-MAX_STEPS=${MAX_STEPS:-3}
 WARMUP_STEPS=${WARMUP_STEPS:-1}
 MAX_LR=${MAX_LR:-6e-5}
 MIN_LR=${MIN_LR:-6e-6}
@@ -77,7 +76,6 @@ ARGS=(
   --total_batch_size "$TOTAL_BATCH_SIZE"
   --batch_size "$BATCH_SIZE"
   --seq_len "$PROMPT_LEN"
-  --max_steps "$MAX_STEPS"
   --max_epochs 1
   --max_lr "$MAX_LR"
   --min_lr "$MIN_LR"
