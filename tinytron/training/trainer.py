@@ -23,6 +23,14 @@ from tinytron.training.config import Config
 from tinytron.model import GPT
 from tinytron.model.gpt import EXPERT_LOCAL_PARAM_SUFFIXES
 import tinytron.optim
+from tinytron.bridge import (
+    bridge_metadata,
+    canonical_state_dict_to_local_training,
+    checkpoint_model_paths,
+    current_tinytron_parallel_spec,
+    export_tinytron_training_state_dict_to_canonical,
+    TinytronParallelSpec,
+)
 from tinytron.distributed import (
     DistributedOptimizer,
     parallel_state,
@@ -326,7 +334,10 @@ class Trainer:
         meta_path = f"{ckpt_prefix}_meta.pt"
         meta = torch.load(meta_path, map_location="cpu")
         # 1) model
-        state_dict = torch.load(f"{ckpt_prefix}_model.pt", map_location="cpu", weights_only=True)
+        model_path, _ = checkpoint_model_paths(f"{ckpt_prefix}_model.pt")
+        state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+        if model_path.endswith("_model_canonical.pt"):
+            state_dict = canonical_state_dict_to_local_training(state_dict, self.model_config)
         self.raw_model.load_state_dict(state_dict)
         # 2) optimizer
         opt_key = f"optimizer/rank{self.rank}"
@@ -439,14 +450,31 @@ class Trainer:
             'python': random.getstate(),
         }
         torch.save(rng_state, os.path.join(rng_dir, f"rank{self.rank}.pt"))
+        canonical_state_dict = export_tinytron_training_state_dict_to_canonical(
+            self.raw_model,
+            self.model_config,
+        )
         dist.barrier()
         if self.master_process:
             torch.save(self.raw_model.state_dict(), f"{checkpoint_path}_model.pt")
+            if canonical_state_dict is not None:
+                torch.save(canonical_state_dict, f"{checkpoint_path}_model_canonical.pt")
+            parallel_spec = current_tinytron_parallel_spec(system="training")
             checkpoint = {
                 'config': self.config.as_dict(),
                 'step': step,
                 'this_step_results': self.one_step_results,
                 'opt_part_assignment': self.optimizer.part_assignment if hasattr(self.optimizer, 'part_assignment') else None,
+                'model_layout': bridge_metadata(
+                    layout_kind="training",
+                    parallel=parallel_spec,
+                    shard_qkv=False,
+                ),
+                'canonical_model_layout': bridge_metadata(
+                    layout_kind="canonical",
+                    parallel=TinytronParallelSpec(system="canonical"),
+                    shard_qkv=False,
+                ) if canonical_state_dict is not None else None,
                 'sampler_state': {
                     'epoch': self.train_sampler_epoch,
                     'iter_idx': self.train_loader_iter_idx,
