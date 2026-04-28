@@ -31,8 +31,8 @@ class RLConfig:
     rollout_shard_qkv: bool = True
 
 
-class GRPOTrainer(Trainer):
-    """Minimal stage-1 RL trainer: synchronous rollout and update on the same ranks."""
+class RLTrainer(Trainer):
+    """Base for RL trainers that share actor rollout and logprob plumbing."""
 
     def __init__(self, config: Config, rl_config: RLConfig):
         self.rl_config = rl_config
@@ -66,7 +66,7 @@ class GRPOTrainer(Trainer):
         for micro_step in range(self.training_info["grad_accum_steps"]):
             batch = self._next_train_batch()
             self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
-            loss, metrics = self._one_rl_micro_step(config, batch)
+            loss, metrics = self._one_rl_micro_step(batch)
             (loss / self.training_info["grad_accum_steps"]).backward()
             loss_accum += metrics["loss"] / self.training_info["grad_accum_steps"]
             reward_accum += metrics["reward"] / self.training_info["grad_accum_steps"]
@@ -99,10 +99,31 @@ class GRPOTrainer(Trainer):
         self.one_step_results["kl"] = kl_accum
         self.one_step_results["grad_norm"] = norm
 
-    def _one_rl_micro_step(self, config: Config, data_batch: dict) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _one_rl_micro_step(self, data_batch: dict) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         prompts = data_batch["input_ids"].to(f"cuda:{self.local_rank}")
         prompts = prompts.repeat_interleave(self.rl_config.group_size, dim=0)
 
+        rollout = self._rollout(prompts)
+        rewards = self._rule_rewards(rollout.responses, rollout.response_mask)
+        advantages = group_advantages(rewards, self.rl_config.group_size).to(rollout.response_mask.dtype)
+        log_probs, old_log_probs, response_mask = self._actor_local_log_probs(
+            rollout.sequences,
+            rollout.old_log_probs,
+            prompt_len=rollout.prompts.size(1),
+        )
+
+        loss, loss_metrics = self._policy_loss(
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            mask=response_mask,
+        )
+        reward = rewards.mean().detach()
+        metrics = {"loss": loss.detach(), "reward": reward}
+        metrics.update(loss_metrics)
+        return loss, metrics
+
+    def _rollout(self, prompts: torch.Tensor):
         self.rollout_engine.model.eval()
         sequences, rollout_info = self.rollout_engine.generate(
             prompts,
@@ -113,33 +134,21 @@ class GRPOTrainer(Trainer):
             eos_token_id=self.rl_config.eos_token_id,
             return_logprobs=True,
         )
-        rollout = make_rollout_batch(
+        return make_rollout_batch(
             prompts=prompts,
             sequences=sequences,
             old_log_probs=rollout_info["token_log_probs"].detach(),
             eos_token_id=self.rl_config.eos_token_id,
         )
-        rewards = self._rule_rewards(rollout.responses, rollout.response_mask)
-        advantages = group_advantages(rewards, self.rl_config.group_size).to(rollout.response_mask.dtype)
 
-        log_probs, old_log_probs, response_mask = self._actor_local_log_probs(
-            rollout.sequences,
-            rollout.old_log_probs,
-            prompt_len=rollout.prompts.size(1),
-        )
-        out = grpo_loss(
-            log_probs=log_probs,
-            old_log_probs=old_log_probs,
-            advantages=advantages,
-            mask=response_mask,
-            clip_range=self.rl_config.clip_range,
-            kl_coef=self.rl_config.kl_coef,
-            group=self.sp_group,
-        )
-        reward = rewards.mean().detach()
-        metrics = {"loss": out.loss.detach(), "reward": reward}
-        metrics.update(out.metrics)
-        return out.loss, metrics
+    def _policy_loss(
+        self,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        raise NotImplementedError
 
     def _actor_local_log_probs(
         self,
@@ -181,3 +190,25 @@ class GRPOTrainer(Trainer):
         reward_sum = (token_scores * response_mask).sum(dim=-1)
         reward_count = response_mask.sum(dim=-1).clamp_min(1.0)
         return reward_sum / reward_count
+
+
+class GRPOTrainer(RLTrainer):
+    """Minimal GRPO-style trainer for stage-1 synchronous RL."""
+
+    def _policy_loss(
+        self,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        out = grpo_loss(
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            mask=mask,
+            clip_range=self.rl_config.clip_range,
+            kl_coef=self.rl_config.kl_coef,
+            group=self.sp_group,
+        )
+        return out.loss, out.metrics

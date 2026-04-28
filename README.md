@@ -98,7 +98,7 @@ For AI-assisted research workflows, see `research-skills/tinytron-research/`. It
 │   │   ├── losses.py                       # DPO / PPO-style / GRPO-style losses
 │   │   ├── rollout.py                      # Rollout batch helpers
 │   │   ├── sync.py                         # Actor training to rollout model bridge sync
-│   │   ├── trainer.py                      # Minimal synchronous GRPO trainer
+│   │   ├── trainer.py                      # RLTrainer base and minimal GRPO trainer
 │   │   └── types.py                        # Lightweight RL dataclasses
 │   │
 │   ├── bridge/                             # Parameter-layout bridge infrastructure
