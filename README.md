@@ -472,6 +472,14 @@ python scripts/debug/pretrain.py \
 
 This generates a Chrome trace file at `<log_dir>/rank{rank}_trace.json` (for the exporting process) that can be viewed in `chrome://tracing`.
 
+## Testing
+
+Run the unit tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Example Model Configurations
 
 ### GPT-0.25B (12 layers)
