@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from dataclasses import replace
 import torch
 import torch.distributed as dist
 
@@ -14,6 +15,7 @@ from tinytron.model.config import ModelConfig, build_model_config
 from tinytron.training.config import ParallelConfig
 from tinytron.inference import InferenceEngine
 from tinytron.inference.arguments import build_parser, parse_prompt_token_ids
+from tinytron.inference.checkpoint import checkpoint_meta_path, checkpoint_prefix_from_model_path
 from tinytron.distributed import parallel_state
 
 
@@ -60,8 +62,9 @@ def destroy_distributed_inference() -> None:
 def load_model_config_from_checkpoint(args) -> ModelConfig:
     model_cfg_dict = None
     if args.checkpoint_path:
-        meta_path = args.checkpoint_path.replace("_model.pt", "_meta.pt")
-        if os.path.exists(meta_path):
+        checkpoint_prefix = checkpoint_prefix_from_model_path(args.checkpoint_path)
+        meta_path = checkpoint_meta_path(checkpoint_prefix) if checkpoint_prefix is not None else None
+        if meta_path is not None and os.path.exists(meta_path):
             meta = torch.load(meta_path, map_location="cpu")
             model_cfg_dict = meta.get("config", {}).get("model")
 
@@ -69,6 +72,9 @@ def load_model_config_from_checkpoint(args) -> ModelConfig:
         model_cfg = build_model_config(args, seed=args.seed)
     else:
         model_cfg = ModelConfig(**model_cfg_dict)
+
+    if args.inference_shard_qkv is not None:
+        model_cfg = replace(model_cfg, inference_shard_qkv=args.inference_shard_qkv)
 
     return model_cfg
 

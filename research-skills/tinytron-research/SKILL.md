@@ -13,6 +13,7 @@ Use this skill for research work in the Tinytron repo. Tinytron is best treated 
 
 - Keep distributed topology and process-group strategy fixed unless the user explicitly asks for distributed-systems work.
 - Prefer local, focused changes in `tinytron/model`, `tinytron/inference`, `tinytron/optim`, or the relevant trainer hook.
+- Treat `tinytron/bridge` as model-state layout infrastructure, not a primary research surface. Modify it only for explicit layout, checkpoint resharding, or model-state transfer work.
 - Start with a small correctness check, usually mock data or a minimal inference run, before proposing long experiments.
 - Separate research changes from cleanup refactors. If cleanup is needed, keep it mechanical and explain why it supports the experiment.
 - When reporting results, distinguish measured data from expected behavior or hypotheses.
@@ -39,5 +40,7 @@ Load only the reference needed for the current task:
 
 - Model path: `tinytron/model/gpt.py`, `tinytron/model/modules/attn.py`, `tinytron/model/modules/mlp.py`, `tinytron/model/modules/norm.py`, `tinytron/model/modules/loss.py`.
 - Inference path: `tinytron/inference/engine.py`, `tinytron/inference/cache.py`, `tinytron/inference/sampler.py`, plus attention cache handling in `tinytron/model/modules/attn.py`.
+- Checkpoint policy: `tinytron/training/checkpoint.py` for training save/resume and `tinytron/inference/checkpoint.py` for inference loading.
+- Parameter-layout support: `tinytron/bridge/`. Use it as infrastructure for layout metadata, shard planning, and file-based model resharding; do not treat it as the default place for architecture, inference, optimizer, or data experiments.
 - Optimizer path: `tinytron/optim/`, `tinytron/training/trainer.py::_init_optimizer`, and ZeRO-1 wrapper behavior in `tinytron/distributed/zero1/distributed_optimizer.py`.
 - Experiment entry points: `scripts/debug/pretrain.py`, `scripts/debug/pretrain.sh`, `scripts/example/pretrain.py`, `scripts/example/pretrain.sh`, `scripts/debug/inference.py`, `scripts/debug/inference.sh`.

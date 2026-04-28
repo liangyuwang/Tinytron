@@ -8,6 +8,7 @@ import time
 from tinytron.model import GPT
 from tinytron.model.config import ModelConfig
 from tinytron.distributed import parallel_state
+from tinytron.inference.checkpoint import load_model_state_dict_for_inference
 from .cache import PagedKVCache
 from .sampler import sample_next_token
 
@@ -30,9 +31,7 @@ class InferenceEngine:
         self.kv_cache_page_size = kv_cache_page_size
         self.model = GPT(model_config).to(self.device)
         if checkpoint_path:
-            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-            if model_config.inference_shard_qkv:
-                state_dict = self._slice_qkv_state_dict_for_local_sep_rank(state_dict, model_config)
+            state_dict = load_model_state_dict_for_inference(checkpoint_path, model_config)
             self.model.load_state_dict(state_dict)
         self.model.eval()
         self.dtype = dtype

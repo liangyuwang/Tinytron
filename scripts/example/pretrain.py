@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import glob
 import random
 import numpy as np
 from dataclasses import dataclass
@@ -20,6 +19,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tinytron.training import Trainer, build_config, build_parser
+from tinytron.training.checkpoint import (
+    checkpoint_meta_path,
+    find_latest_checkpoint_prefix,
+    load_model_state_dict_for_training,
+    model_layout_metadata,
+    save_local_model_shard,
+    save_rank0_legacy_model,
+    training_layout_matches_current,
+)
 from tinytron.training.config import Config
 
 # git clone https://github.com/liangyuwang/Streaming-Dataloader.git external/streaming_dataloader
@@ -141,33 +149,34 @@ class OurTrainer(Trainer):
 
     def _resume_from_checkpoint(self):
         ckpt_dir = self.config.ckpt.resume_path or self.log_dir
-        pattern = os.path.join(ckpt_dir, "*_model.pt")
-        ckpts = sorted(glob.glob(pattern))
-
-        if not ckpts:
+        ckpt_prefix = find_latest_checkpoint_prefix(ckpt_dir)
+        if ckpt_prefix is None:
             self.start_step = 0
             return
 
-        ckpt_prefix = ckpts[-1].replace("_model.pt", "")
-        meta_path = f"{ckpt_prefix}_meta.pt"
+        meta_path = checkpoint_meta_path(ckpt_prefix)
         meta = torch.load(meta_path, map_location="cpu")
 
         # 1) model
-        state_dict = torch.load(
-            f"{ckpt_prefix}_model.pt",
-            map_location="cpu",
-            weights_only=True,
+        state_dict = load_model_state_dict_for_training(
+            checkpoint_prefix=ckpt_prefix,
+            model_config=self.model_config,
+            rank=self.rank,
+            meta=meta,
         )
         self.raw_model.load_state_dict(state_dict)
 
         # 2) optimizer
-        opt_key = f"optimizer/rank{self.rank}"
-        opt_state_placeholder = {opt_key: self.raw_optimizer.state_dict()}
-        state_dict_loader.load(
-            state_dict=opt_state_placeholder,
-            storage_reader=FileSystemReader(f"{ckpt_prefix}_opt"),
-        )
-        self.raw_optimizer.load_state_dict(opt_state_placeholder[opt_key])
+        if training_layout_matches_current(meta):
+            opt_key = f"optimizer/rank{self.rank}"
+            opt_state_placeholder = {opt_key: self.raw_optimizer.state_dict()}
+            state_dict_loader.load(
+                state_dict=opt_state_placeholder,
+                storage_reader=FileSystemReader(f"{ckpt_prefix}_opt"),
+            )
+            self.raw_optimizer.load_state_dict(opt_state_placeholder[opt_key])
+        elif self.master_process:
+            print("=> Skipping optimizer restore because checkpoint model_layout differs from current layout.")
 
         # 3) dataset state (streaming version)
         has_dataset_state = "dataset_state" in meta
@@ -256,10 +265,11 @@ class OurTrainer(Trainer):
             "python": random.getstate(),
         }
         torch.save(rng_state, os.path.join(rng_dir, f"rank{self.rank}.pt"))
+        save_local_model_shard(self.raw_model, checkpoint_path, self.rank)
         dist.barrier()
 
         if self.master_process:
-            torch.save(self.raw_model.state_dict(), f"{checkpoint_path}_model.pt")
+            save_rank0_legacy_model(self.raw_model, checkpoint_path)
 
             checkpoint = {
                 "config": self.config.as_dict(),
@@ -270,6 +280,9 @@ class OurTrainer(Trainer):
                     if hasattr(self.optimizer, "part_assignment")
                     else None
                 ),
+                "model_layout": model_layout_metadata(),
+                "model_sharded": True,
+                "model_shard_pattern": f"{step:05d}_model_rank{{rank:05d}}.pt",
                 "dataset_state": {
                     "epoch": int(dataset_epoch_next),
                     "global_skip_batches": int(global_skip_batches_next),

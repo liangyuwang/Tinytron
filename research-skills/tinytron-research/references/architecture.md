@@ -24,6 +24,7 @@ Use this reference for model architecture changes. Keep experiments narrow enoug
 - Keep tensor shapes explicit in comments only where shape movement is hard to infer.
 - Preserve training and inference compatibility unless the experiment is explicitly training-only.
 - If a new config changes checkpoint compatibility, document the default and expected migration behavior.
+- Do not put architecture experiments in `tinytron/bridge`; bridge code is for parameter-layout metadata, shard planning, and checkpoint/inference reshard support.
 - For MoE changes, check both single-rank and `sep_size > 1` paths when practical because EP behavior is tied to SEP groups.
 
 ## Minimal Validation

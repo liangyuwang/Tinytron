@@ -66,4 +66,5 @@ def _add_model_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     g = parser.add_argument_group("model")
     g.add_argument("--seed", type=int, default=1337)
     add_model_config_args(g)
+    g.add_argument("--inference_shard_qkv", action=argparse.BooleanOptionalAction, default=None)
     return parser
