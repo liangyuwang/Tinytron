@@ -42,7 +42,8 @@ class Block(nn.Module):
         mlp_out = self.mlp(self.ln_2(x), use_cache=use_cache)
         x = x + mlp_out[0] if self.use_moe else x + mlp_out
         gate_logits = mlp_out[1] if self.use_moe else None
-        return x, gate_logits, new_kv
+        router_probe_loss = mlp_out[2] if self.use_moe else None
+        return x, gate_logits, router_probe_loss, new_kv
 
 # GPT-like Model
 
@@ -100,9 +101,11 @@ class GPT(nn.Module):
                 layer_past = paged_cache.get_layer_cache(layer_idx)
             else:
                 layer_past = past_key_values[layer_idx] if past_key_values is not None else None
-            x, gate_logits, new_kv = block(x, past_kv=layer_past, use_cache=use_cache, position_offset=position_offset)
+            x, gate_logits, router_probe_loss, new_kv = block(x, past_kv=layer_past, use_cache=use_cache, position_offset=position_offset)
             if self.expert_loss_fn is not None and gate_logits is not None and targets is not None:
                 total_aux_loss += self.expert_loss_fn(gate_logits)
+            if router_probe_loss is not None and targets is not None:
+                total_aux_loss += router_probe_loss
             if use_cache and paged_cache is None:
                 new_past_key_values.append(new_kv)
         x = self.lnf(x)
