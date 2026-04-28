@@ -177,7 +177,7 @@ class BridgeMaterializerTest(unittest.TestCase):
     def test_file_shard_store_materializes_sep_reshard_without_rank0_gather(self) -> None:
         import torch
 
-        from tinytron.bridge import StateDictTensorStore
+        from tinytron.bridge import StateDictShardFileStore, StateDictTensorStore, localize_layout
 
         cfg = tiny_moe_config()
         src_layout = build_tinytron_training_layout(
