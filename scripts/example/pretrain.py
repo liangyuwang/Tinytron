@@ -22,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 from tinytron.training import Trainer, build_config, build_parser
 from tinytron.training.config import Config
 from tinytron.bridge import (
-    TinytronParallelSpec,
+    ParallelSpec,
     bridge_metadata,
     canonical_state_dict_to_local_training,
     checkpoint_model_paths,
@@ -295,7 +295,7 @@ class OurTrainer(Trainer):
                 ),
                 "canonical_model_layout": bridge_metadata(
                     layout_kind="canonical",
-                    parallel=TinytronParallelSpec(system="canonical"),
+                    parallel=ParallelSpec(system="canonical"),
                     shard_qkv=False,
                 ) if canonical_state_dict is not None else None,
                 "dataset_state": {

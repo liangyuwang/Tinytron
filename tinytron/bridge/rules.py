@@ -8,7 +8,7 @@ from .layout import LayoutIndex, Placement, RankCoord, ShardSpec, SliceSpec, ful
 
 
 @dataclass(frozen=True)
-class TinytronParallelSpec:
+class ParallelSpec:
     """Tinytron logical parallel shape without binding to live process groups."""
 
     dp_size: int = 1
@@ -46,7 +46,7 @@ def build_tinytron_canonical_layout(
 
 def build_tinytron_training_layout(
     model_config: ModelConfig,
-    parallel: TinytronParallelSpec,
+    parallel: ParallelSpec,
 ) -> LayoutIndex:
     placements = parallel.placements()
     shards: list[ShardSpec] = []
@@ -78,7 +78,7 @@ def build_tinytron_training_layout(
 
 def build_tinytron_inference_layout(
     model_config: ModelConfig,
-    parallel: TinytronParallelSpec,
+    parallel: ParallelSpec,
     shard_qkv: bool = False,
 ) -> LayoutIndex:
     placements = parallel.placements()

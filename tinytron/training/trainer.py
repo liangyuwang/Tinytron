@@ -29,7 +29,7 @@ from tinytron.bridge import (
     checkpoint_model_paths,
     current_tinytron_parallel_spec,
     export_tinytron_training_state_dict_to_canonical,
-    TinytronParallelSpec,
+    ParallelSpec,
 )
 from tinytron.distributed import (
     DistributedOptimizer,
@@ -472,7 +472,7 @@ class Trainer:
                 ),
                 'canonical_model_layout': bridge_metadata(
                     layout_kind="canonical",
-                    parallel=TinytronParallelSpec(system="canonical"),
+                    parallel=ParallelSpec(system="canonical"),
                     shard_qkv=False,
                 ) if canonical_state_dict is not None else None,
                 'sampler_state': {

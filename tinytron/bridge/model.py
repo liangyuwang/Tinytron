@@ -13,7 +13,7 @@ from .layout import LayoutIndex, Placement
 from .materializers import BridgeContext, RoutedMaterializer
 from .planner import LayoutPlanner
 from .rules import (
-    TinytronParallelSpec,
+    ParallelSpec,
     build_tinytron_canonical_layout,
     build_tinytron_inference_layout,
     build_tinytron_training_layout,
@@ -47,17 +47,17 @@ def checkpoint_meta_path(model_path: str) -> str:
     return model_path.replace("_model.pt", "_meta.pt")
 
 
-def current_tinytron_parallel_spec(system: str) -> TinytronParallelSpec:
+def current_tinytron_parallel_spec(system: str) -> ParallelSpec:
     if dist.is_available() and dist.is_initialized():
         try:
-            return TinytronParallelSpec(
+            return ParallelSpec(
                 dp_size=int(parallel_state.get_dp_world_size()),
                 sep_size=int(parallel_state.get_sep_world_size()),
                 system=system,
             )
         except AssertionError:
             pass
-    return TinytronParallelSpec(dp_size=1, sep_size=1, system=system)
+    return ParallelSpec(dp_size=1, sep_size=1, system=system)
 
 
 def current_tinytron_placement(layout: LayoutIndex) -> Placement:
@@ -80,7 +80,7 @@ def localize_layout(layout: LayoutIndex, placement: Placement) -> LayoutIndex:
 def bridge_metadata(
     *,
     layout_kind: str,
-    parallel: TinytronParallelSpec,
+    parallel: ParallelSpec,
     shard_qkv: bool = False,
     format_version: int = 1,
 ) -> dict:

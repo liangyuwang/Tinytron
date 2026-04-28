@@ -9,7 +9,7 @@ from .layout import (
 )
 from .planner import LayoutPlanner, TensorMove
 from .rules import (
-    TinytronParallelSpec,
+    ParallelSpec,
     build_tinytron_canonical_layout,
     build_tinytron_inference_layout,
     build_tinytron_training_layout,
@@ -30,7 +30,7 @@ __all__ = [
     "TensorMove",
     "TensorRoute",
     "TensorStore",
-    "TinytronParallelSpec",
+    "ParallelSpec",
     "build_tinytron_canonical_layout",
     "build_tinytron_inference_layout",
     "build_tinytron_training_layout",
