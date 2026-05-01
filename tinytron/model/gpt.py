@@ -157,5 +157,7 @@ class GPT(nn.Module):
         clip_coef = max_norm / (total_norm + 1e-6)
         clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
         for p in self.parameters():
+            if p.grad is None:
+                continue
             p.grad.detach().mul_(clip_coef_clamped)
         return total_norm
