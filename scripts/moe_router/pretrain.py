@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import sys
 from pathlib import Path
 
@@ -167,6 +167,16 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
                 print(f"[moe_router] step {step} phase={phase} " + " ".join(extras), flush=True)
 
 
+def _needs_find_unused_parameters(router_exp: RouterExperimentConfig) -> bool:
+    return (
+        router_exp.router_warmup_steps > 0
+        or (
+            router_exp.router_bootstrap_steps > 0
+            and router_exp.bootstrap_freeze_experts
+        )
+    )
+
+
 def main():
     args = parse_args()
     cfg = build_config(args)
@@ -188,6 +198,11 @@ def main():
         bootstrap_freeze_experts=bool(args.bootstrap_freeze_experts),
         disable_probe_ranking=bool(args.disable_probe_ranking),
     )
+    if _needs_find_unused_parameters(router_exp) and not cfg.parallel.ddp_find_unused_parameters:
+        cfg = replace(
+            cfg,
+            parallel=replace(cfg.parallel, ddp_find_unused_parameters=True),
+        )
     trainer = MoERouterExperimentTrainer(cfg, router_exp)
     trainer.train()
 
