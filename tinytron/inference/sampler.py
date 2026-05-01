@@ -3,16 +3,17 @@ from __future__ import annotations
 import torch
 
 
-def sample_next_token(
+def filter_logits(
     logits: torch.Tensor,
     temperature: float = 1.0,
     top_k: int | None = None,
     top_p: float | None = None,
 ) -> torch.Tensor:
-    """Sample the next token ids from logits of shape [B, V]."""
+    """Apply temperature/top-k/top-p filtering to logits of shape [B, V]."""
     if temperature <= 0:
         raise ValueError("temperature must be > 0")
 
+    logits = logits.float()
     if temperature != 1.0:
         logits = logits / temperature
 
@@ -32,5 +33,30 @@ def sample_next_token(
         logits = torch.full_like(logits, float("-inf"))
         logits.scatter_(dim=-1, index=sorted_indices, src=keep_sorted_logits)
 
+    return logits
+
+
+def sample_next_token(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int | None = None,
+    top_p: float | None = None,
+) -> torch.Tensor:
+    """Sample the next token ids from logits of shape [B, V]."""
+    logits = filter_logits(logits, temperature=temperature, top_k=top_k, top_p=top_p)
     probs = torch.softmax(logits, dim=-1)
     return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+
+def sample_next_token_with_log_prob(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int | None = None,
+    top_p: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample token ids and return their logprobs under the sampling distribution."""
+    logits = filter_logits(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+    log_probs = torch.log_softmax(logits, dim=-1)
+    next_token = torch.multinomial(log_probs.exp(), num_samples=1).squeeze(-1)
+    next_log_prob = log_probs.gather(dim=-1, index=next_token.unsqueeze(-1)).squeeze(-1)
+    return next_token, next_log_prob

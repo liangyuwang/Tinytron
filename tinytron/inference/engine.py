@@ -10,7 +10,7 @@ from tinytron.model.config import ModelConfig
 from tinytron.distributed import parallel_state
 from tinytron.inference.checkpoint import load_model_state_dict_for_inference
 from .cache import PagedKVCache
-from .sampler import sample_next_token
+from .sampler import sample_next_token, sample_next_token_with_log_prob
 
 
 class InferenceEngine:
@@ -102,6 +102,41 @@ class InferenceEngine:
         dist.broadcast(next_token, src=sep_src, group=sep_group)
         return next_token
 
+    def _sample_next_token_with_log_prob_synced(
+        self,
+        logits: torch.Tensor,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not (dist.is_available() and dist.is_initialized()):
+            return sample_next_token_with_log_prob(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+
+        try:
+            sep_group = parallel_state.get_sep_group()
+            sep_rank = parallel_state.get_sep_rank()
+            sep_world_size = parallel_state.get_sep_world_size()
+            sep_src = parallel_state.get_sep_global_rank(0)
+        except AssertionError:
+            return sample_next_token_with_log_prob(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+
+        if sep_world_size <= 1:
+            return sample_next_token_with_log_prob(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+
+        if sep_rank == 0:
+            next_token, next_log_prob = sample_next_token_with_log_prob(
+                logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+            )
+        else:
+            next_token = torch.empty(logits.size(0), dtype=torch.long, device=logits.device)
+            next_log_prob = torch.empty(logits.size(0), dtype=torch.float32, device=logits.device)
+        dist.broadcast(next_token, src=sep_src, group=sep_group)
+        dist.broadcast(next_log_prob, src=sep_src, group=sep_group)
+        return next_token, next_log_prob
+
     @torch.no_grad()
     def generate(
         self,
@@ -112,7 +147,8 @@ class InferenceEngine:
         top_p: float | None = None,
         eos_token_id: int | None = None,
         return_stats: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+        return_logprobs: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict]:
         if input_ids.dim() != 2:
             raise ValueError(f"input_ids must be [B, T], got shape={tuple(input_ids.shape)}")
         prompt = input_ids.to(self.device)
@@ -150,15 +186,25 @@ class InferenceEngine:
                 torch.cuda.synchronize(self.device)
             prefill_t1 = time.perf_counter()
             decode_steps = 0
+            token_log_probs = []
             decode_t0 = time.perf_counter()
             for _ in range(max_new_tokens):
                 next_logits = logits[:, -1, :]
-                next_token = self._sample_next_token_synced(
-                    next_logits,
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
-                )
+                if return_logprobs:
+                    next_token, next_log_prob = self._sample_next_token_with_log_prob_synced(
+                        next_logits,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                    )
+                    token_log_probs.append(next_log_prob)
+                else:
+                    next_token = self._sample_next_token_synced(
+                        next_logits,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                    )
                 tokens[:, current_length] = next_token
                 current_length += 1
                 decode_steps += 1
@@ -179,16 +225,33 @@ class InferenceEngine:
 
         tokens = tokens[:, :current_length]
 
-        if not return_stats:
+        if not return_stats and not return_logprobs:
             return tokens
 
+        extras = {}
         prefill_time = max(prefill_t1 - prefill_t0, 1e-9)
         decode_time = max(decode_t1 - decode_t0, 1e-9)
         decode_tokens = int(tokens.size(0) * decode_steps)
-        stats = {
-            "prefill_tokens_per_sec": prefill_tokens / prefill_time,
-            "decode_tokens_per_sec": decode_tokens / decode_time if decode_steps > 0 else 0.0,
-            "prefill_tokens": float(prefill_tokens),
-            "decode_tokens": float(decode_tokens),
-        }
-        return tokens, stats
+        if return_stats:
+            extras.update(
+                {
+                    "prefill_tokens_per_sec": prefill_tokens / prefill_time,
+                    "decode_tokens_per_sec": decode_tokens / decode_time if decode_steps > 0 else 0.0,
+                    "prefill_tokens": float(prefill_tokens),
+                    "decode_tokens": float(decode_tokens),
+                }
+            )
+        if return_logprobs:
+            if token_log_probs:
+                log_probs = torch.stack(token_log_probs, dim=1)
+            else:
+                log_probs = torch.empty(tokens.size(0), 0, dtype=torch.float32, device=tokens.device)
+            extras.update(
+                {
+                    "prompt_len": float(prompt_len),
+                    "decode_steps": float(decode_steps),
+                    "token_log_probs": log_probs,
+                    "response_mask": torch.ones_like(log_probs, dtype=torch.float32),
+                }
+            )
+        return tokens, extras

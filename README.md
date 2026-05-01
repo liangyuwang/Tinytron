@@ -42,6 +42,7 @@ Good research fits include:
   - Model FLOPs Utilization (MFU) tracking
   - PyTorch profiler integration
   - Auto-tune script for throughput search (`scripts/autotune.sh`)
+  - RL primitives for rollout batches, response masks, token logprobs, actor-to-rollout bridge sync, DPO, PPO-style, and GRPO-style losses
 
 - **Fast iteration paths**:
   - Mock data mode for rapid debugging
@@ -91,6 +92,15 @@ For AI-assisted research workflows, see `research-skills/tinytron-research/`. It
 │   │   ├── arguments.py                    # CLI argument definitions
 │   │   └── trainer.py                      # Trainer and dataset init
 │   │
+│   ├── rl/                                 # RL training primitives
+│   │   ├── __init__.py
+│   │   ├── logprobs.py                     # Token logprob and response-mask helpers
+│   │   ├── losses.py                       # DPO / PPO-style / GRPO-style losses
+│   │   ├── rollout.py                      # Rollout batch helpers
+│   │   ├── sync.py                         # Actor training to rollout model bridge sync
+│   │   ├── trainer.py                      # RLTrainer base and minimal GRPO trainer
+│   │   └── types.py                        # Lightweight RL dataclasses
+│   │
 │   ├── bridge/                             # Parameter-layout bridge infrastructure
 │   │   ├── layout.py                       # Layout, placement, and shard metadata
 │   │   ├── planner.py                      # Source/target shard movement planning
@@ -123,6 +133,8 @@ For AI-assisted research workflows, see `research-skills/tinytron-research/`. It
 │   ├── debug/
 │   │   ├── inference.py                    # Debug inference entry (KV cache)
 │   │   ├── inference.sh                    # Inference debug launch script
+│   │   ├── rl.py                           # Debug RL entry (sync rollout + update)
+│   │   ├── rl.sh                           # RL debug launch script
 │   │   ├── pretrain.py                     # Debug entry (mock data, minimal deps)
 │   │   └── pretrain.sh                     # Configurable debug launch script
 │   ├── example/
@@ -305,6 +317,44 @@ MODEL_SIZE=0.1B CKPT_PATH=/path/to/00500_model.pt \
 bash scripts/debug/inference.sh
 ```
 
+### 6. RL Debug Baseline
+
+Tinytron includes a small synchronous RL path for checking the rollout-to-update loop before building larger RLHF systems. It runs actor training and rollout inference on the same ranks, but still treats them as different model layouts: before rollout, `ActorRolloutBridge` materializes the actor training layout into the rollout inference layout through `tinytron/bridge`.
+
+Run the default GRPO-style smoke test:
+
+```bash
+bash scripts/debug/rl.sh
+```
+
+Run with SEP and QKV-sharded rollout inference:
+
+```bash
+NUM_GPUS=2 SEP_SIZE=2 MODEL_SIZE=0.03B bash scripts/debug/rl.sh
+```
+
+Useful environment overrides:
+
+```bash
+PROMPT_LEN=17 \
+RL_MAX_NEW_TOKENS=8 \
+RL_GROUP_SIZE=4 \
+RL_TEMPERATURE=1.0 \
+RL_TOP_K=50 \
+RL_REWARD_TARGET_TOKEN_ID=0 \
+bash scripts/debug/rl.sh
+```
+
+What this path does:
+- Builds prompts from the same mock LM data path used by debug pretraining.
+- Synchronizes actor weights into a rollout model through bridge layout materialization.
+- Generates `group_size` responses per prompt and records sampled token logprobs.
+- Packs rollout results as padded variable-length tensors. `labels == -100` marks prompt tokens, EOS-after tokens, and invalid/padded positions.
+- Recomputes actor logprobs in the training layout and applies a GRPO-style clipped policy loss.
+- Uses a simple rule reward for debugging. Replace `_rule_rewards` or subclass `RLTrainer` for task rewards or reward-model scoring.
+
+The RL debug script automatically pads `--seq_len` to a multiple of `SEP_SIZE` and adjusts `RL_MAX_NEW_TOKENS` when needed so the actor recompute length can be split by SEP.
+
 ## Configuration
 
 Configuration is built from CLI arguments via `tinytron/training/arguments.py` and assembled into a unified `Config` in `tinytron/training/config.py`. Configs are ordinary dataclasses, so adding a new experiment knob usually means adding one CLI argument, one config field, and one use site.
@@ -471,6 +521,14 @@ python scripts/debug/pretrain.py \
 ```
 
 This generates a Chrome trace file at `<log_dir>/rank{rank}_trace.json` (for the exporting process) that can be viewed in `chrome://tracing`.
+
+## Testing
+
+Run the unit tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Example Model Configurations
 

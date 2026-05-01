@@ -34,6 +34,30 @@ class LocalCopyRoute:
         context.dst_store.write(move.dst_shard, tensor, move.dst_slices)
 
 
+class DistributedCopyRoute:
+    """Route for live rank-local state_dicts inside one process group."""
+
+    def __init__(self, rank: int):
+        self.rank = int(rank)
+
+    def can_materialize(self, move: TensorMove, context: BridgeContext) -> bool:
+        return True
+
+    def materialize(self, move: TensorMove, context: BridgeContext) -> None:
+        src_rank = int(move.src.rank or 0)
+        dst_rank = int(move.dst.rank or 0)
+        if src_rank == dst_rank:
+            if self.rank == dst_rank:
+                read_local = getattr(context.src_store, "read_local", context.src_store.read)
+                tensor = read_local(move.src_shard, move.src_slices)
+                context.dst_store.write(move.dst_shard, tensor, move.dst_slices)
+            return
+
+        tensor = context.src_store.read(move.src_shard, move.src_slices)
+        if self.rank == dst_rank:
+            context.dst_store.write(move.dst_shard, tensor, move.dst_slices)
+
+
 class RoutedMaterializer:
     """Execute a plan through route objects selected per move."""
 

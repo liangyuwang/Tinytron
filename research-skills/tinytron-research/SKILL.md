@@ -1,13 +1,13 @@
 ---
 name: tinytron-research
-description: Use when planning, implementing, or evaluating research experiments in the Tinytron repository, especially model architecture, inference strategy, KV-cache design, optimizer behavior, and small-scale training measurement. Treat distributed parallelism as a fixed support layer unless the user explicitly asks to redesign it.
+description: Use when planning, implementing, or evaluating research experiments in the Tinytron repository, especially model architecture, inference strategy, KV-cache design, optimizer behavior, reinforcement-learning alignment, and small-scale training measurement. Treat distributed parallelism as a fixed support layer unless the user explicitly asks to redesign it.
 metadata:
   short-description: Tinytron research workflows
 ---
 
 # Tinytron Research
 
-Use this skill for research work in the Tinytron repo. Tinytron is best treated as a transparent GPT experimentation base: distributed code supports multi-GPU execution, but the main research surfaces are model architecture, inference, KV cache, optimizer choices, and experiment measurement.
+Use this skill for research work in the Tinytron repo. Tinytron is best treated as a transparent GPT experimentation base: distributed code supports multi-GPU execution, but the main research surfaces are model architecture, inference, KV cache, optimizer choices, RL alignment, and experiment measurement.
 
 ## Default Stance
 
@@ -25,6 +25,7 @@ Load only the reference needed for the current task:
 - For attention, RoPE, GQA, MLP, MoE, norm, or loss changes, read `references/architecture.md`.
 - For generation, prefill/decode, sampling, paged KV cache, cache layout, or cache quantization, read `references/inference-kv-cache.md`.
 - For AdamW, Muon, parameter groups, router/expert learning rates, or gradient clipping, read `references/optimizer.md`.
+- For RLTrainer, GRPO/RLOO/PPO/DPO design, rollout batches, rewards, actor-rollout sync, or bridge-backed live layout transfer, read `references/rl.md`.
 - For designing runs, comparing baselines, choosing metrics, or writing result summaries, read `references/experiment-protocol.md`.
 
 ## Research Workflow
@@ -42,5 +43,6 @@ Load only the reference needed for the current task:
 - Inference path: `tinytron/inference/engine.py`, `tinytron/inference/cache.py`, `tinytron/inference/sampler.py`, plus attention cache handling in `tinytron/model/modules/attn.py`.
 - Checkpoint policy: `tinytron/training/checkpoint.py` for training save/resume and `tinytron/inference/checkpoint.py` for inference loading.
 - Parameter-layout support: `tinytron/bridge/`. Use it as infrastructure for layout metadata, shard planning, and file-based model resharding; do not treat it as the default place for architecture, inference, optimizer, or data experiments.
+- RL path: `tinytron/rl/` for rollout batch types, logprob helpers, losses, actor-rollout sync, `RLTrainer`, and algorithm subclasses such as `GRPOTrainer`; `scripts/debug/rl.py` and `scripts/debug/rl.sh` are the stage-1 debug entry points.
 - Optimizer path: `tinytron/optim/`, `tinytron/training/trainer.py::_init_optimizer`, and ZeRO-1 wrapper behavior in `tinytron/distributed/zero1/distributed_optimizer.py`.
-- Experiment entry points: `scripts/debug/pretrain.py`, `scripts/debug/pretrain.sh`, `scripts/example/pretrain.py`, `scripts/example/pretrain.sh`, `scripts/debug/inference.py`, `scripts/debug/inference.sh`.
+- Experiment entry points: `scripts/debug/pretrain.py`, `scripts/debug/pretrain.sh`, `scripts/example/pretrain.py`, `scripts/example/pretrain.sh`, `scripts/debug/inference.py`, `scripts/debug/inference.sh`, `scripts/debug/rl.py`, `scripts/debug/rl.sh`.

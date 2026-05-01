@@ -116,6 +116,7 @@ class OurTrainer(Trainer):
             num_workers=config.data.num_workers,
             pin_memory=config.data.pin_memory,
             drop_last=False,
+            collate_fn=self._build_lm_collate_fn(config),
         )
         self.val_loader = None
         self.num_train_samples = self.train_dataset.total_samples

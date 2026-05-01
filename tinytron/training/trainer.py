@@ -12,6 +12,7 @@ import time
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.distributed.checkpoint import state_dict_saver, state_dict_loader
@@ -123,10 +124,11 @@ class Trainer:
             if config.train.do_val:
                 self.val_dataset = CustomDataset(dataset_path=config.data.dataset_path, split="validation")
         self.train_sampler = DistributedSampler(self.train_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank, shuffle=True)
-        self.train_loader = DataLoader(self.train_dataset, batch_size=config.train.batch_size, sampler=self.train_sampler, num_workers=config.data.num_workers, pin_memory=config.data.pin_memory)
+        collate_fn = self._build_lm_collate_fn(config)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=config.train.batch_size, sampler=self.train_sampler, num_workers=config.data.num_workers, pin_memory=config.data.pin_memory, collate_fn=collate_fn)
         if config.train.do_val:
             self.val_sampler = DistributedSampler(self.val_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank, shuffle=False)
-            self.val_loader = DataLoader(self.val_dataset, batch_size=config.train.batch_size, sampler=self.val_sampler, num_workers=config.data.num_workers, pin_memory=config.data.pin_memory)
+            self.val_loader = DataLoader(self.val_dataset, batch_size=config.train.batch_size, sampler=self.val_sampler, num_workers=config.data.num_workers, pin_memory=config.data.pin_memory, collate_fn=collate_fn)
         else:
             self.val_dataset = self.val_loader = None
         self.num_train_samples = len(self.train_dataset)
@@ -134,6 +136,60 @@ class Trainer:
         self.train_loader_iter_idx = 0
         if self.train_sampler is not None:
             self.train_sampler.set_epoch(self.train_sampler_epoch)
+
+    def _build_lm_collate_fn(self, config: Config):
+        pad_token_id = 0
+        ignore_index = -100
+
+        def _to_1d_long(value) -> torch.Tensor:
+            tensor = value if torch.is_tensor(value) else torch.tensor(value, dtype=torch.long)
+            return tensor.to(dtype=torch.long).view(-1)
+
+        def _trim_or_pad(
+            tensors: list[torch.Tensor],
+            padding_value: int,
+            target_len: int,
+        ) -> torch.Tensor:
+            tensors = [tensor[:target_len] for tensor in tensors]
+            return pad_sequence(tensors, batch_first=True, padding_value=padding_value)
+
+        def collate(batch: list[dict]) -> dict[str, torch.Tensor]:
+            input_ids: list[torch.Tensor] = []
+            labels: list[torch.Tensor] = []
+            for item in batch:
+                if "labels" in item:
+                    x = _to_1d_long(item["input_ids"])
+                    y = _to_1d_long(item["labels"])
+                else:
+                    tokens = _to_1d_long(item["input_ids"])
+                    x = tokens[:-1]
+                    y = tokens[1:]
+                sample_len = min(x.numel(), y.numel(), config.train.seq_len)
+                input_ids.append(x[:sample_len])
+                labels.append(y[:sample_len])
+
+            max_len = max((x.numel() for x in input_ids), default=0)
+            if max_len == 0:
+                raise ValueError("Encountered an empty language-modeling batch.")
+            target_len = min(max_len, config.train.seq_len)
+            if target_len % self.sp_world_size != 0:
+                target_len += self.sp_world_size - (target_len % self.sp_world_size)
+            if target_len > config.train.seq_len:
+                raise ValueError(
+                    f"Batch max sequence length {max_len} cannot be padded to sep_size={self.sp_world_size} "
+                    f"within seq_len={config.train.seq_len}."
+                )
+
+            x = _trim_or_pad(input_ids, pad_token_id, target_len)
+            y = _trim_or_pad(labels, ignore_index, target_len)
+            return {
+                "input_ids": x,
+                "labels": y,
+                "valid_token_count": (y != ignore_index).sum(),
+                "padded_token_count": torch.tensor(x.numel(), dtype=torch.long),
+            }
+
+        return collate
 
     def _init_model(self, config: Config):
         torch.set_float32_matmul_precision('high')
@@ -277,22 +333,32 @@ class Trainer:
         
     def _one_training_micro_step(self, config: Config, micro_step: int, data_batch: dict):
         x, y = self._prepare_local_batch(data_batch)
+        valid_token_count = (y != -100).sum().detach()
         with self.profiler_record_fn("forward"):
             with self._autocast_context(config.train.precision):
                 _, loss, logging_loss = self.model(x.reshape(x.shape[0],-1), y.reshape(y.shape[0],-1))
-        loss = loss / self.training_info["grad_accum_steps"]
+        tokens_per_dp_rank = valid_token_count.to(dtype=torch.float32)
+        dist.all_reduce(tokens_per_dp_rank, op=dist.ReduceOp.SUM, group=self.sp_group)
+        tokens_per_ddp_group = tokens_per_dp_rank.clone()
+        dist.all_reduce(tokens_per_ddp_group, op=dist.ReduceOp.SUM, group=self.dp_group)
+        loss_weight = tokens_per_dp_rank * self.dp_world_size / tokens_per_ddp_group.clamp(min=1.0)
+        loss = loss * loss_weight.to(dtype=loss.dtype) / self.training_info["grad_accum_steps"]
         with self.profiler_record_fn("backward"):
             loss.backward()
-        return logging_loss / self.training_info["grad_accum_steps"]
+        logging_loss = logging_loss * loss_weight.to(dtype=logging_loss.dtype) / self.training_info["grad_accum_steps"]
+        return logging_loss, valid_token_count
 
     def _one_training_step(self, config: Config, step: int):
         self.model.train()
         self.optimizer.zero_grad()
         loss_accum = 0.0
+        valid_tokens_accum = torch.tensor(0, device=f"cuda:{self.local_rank}", dtype=torch.long)
         for micro_step in range(self.training_info["grad_accum_steps"]):
             batch = self._next_train_batch()
             self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
-            loss_accum += self._one_training_micro_step(config, micro_step, batch)
+            logging_loss, valid_token_count = self._one_training_micro_step(config, micro_step, batch)
+            loss_accum += logging_loss
+            valid_tokens_accum += valid_token_count
         # TODO: Refactor optimizer/grad communication by parameter group (dense/router vs expert-local).
         allreduce_non_expert_grads_across_sp(
             model=self.raw_model,
@@ -306,9 +372,11 @@ class Trainer:
             param_group['lr'] = lr
         self.optimizer.step()
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG, group=self.dp_group)
+        dist.all_reduce(valid_tokens_accum, op=dist.ReduceOp.SUM, group=self.dp_sp_group)
         self.one_step_results["lr"] = lr
         self.one_step_results["loss"] = loss_accum
         self.one_step_results["grad_norm"] = norm
+        self.one_step_results["valid_tokens"] = valid_tokens_accum
     
     def _next_train_batch(self):
         try:
@@ -410,7 +478,9 @@ class Trainer:
             # 4) print
             t1 = time.time()
             dt = t1 - t0 # time difference in seconds
-            tokens_processed = self.config.train.batch_size * self.config.train.seq_len * self.training_info["grad_accum_steps"] * self.dp_world_size
+            tokens_processed = int(self.one_step_results.get("valid_tokens", torch.tensor(0)).item())
+            if tokens_processed <= 0:
+                tokens_processed = self.config.train.batch_size * self.config.train.seq_len * self.training_info["grad_accum_steps"] * self.dp_world_size
             tokens_per_sec = tokens_processed / dt
             mfu, actual, peak = compute_mfu(
                 self.raw_model, self.config.train.batch_size, self.config.train.seq_len, dt, self.training_info["grad_accum_steps"], dtype="bf16")
@@ -425,17 +495,20 @@ class Trainer:
     def eval(self):
         self.model.eval()
         with torch.no_grad():
-            val_loss_accum = 0.0
-            val_loss_steps = len(self.val_loader)
+            val_loss_sum = torch.tensor(0.0, device=f"cuda:{self.local_rank}")
+            val_valid_tokens = torch.tensor(0.0, device=f"cuda:{self.local_rank}")
             for batch in tqdm(self.val_loader, desc="Val", disable=not self.master_process):
                 x, y = self._prepare_local_batch(batch)
                 with self._autocast_context(self.config.train.precision):
                     logits, _, logging_loss = self.model(x.reshape(x.shape[0],-1), y.reshape(y.shape[0],-1))
-                loss = logging_loss / val_loss_steps
-                val_loss_accum += loss
+                tokens_per_dp_rank = (y != -100).sum().to(dtype=torch.float32)
+                dist.all_reduce(tokens_per_dp_rank, op=dist.ReduceOp.SUM, group=self.sp_group)
+                val_loss_sum += logging_loss * tokens_per_dp_rank
+                val_valid_tokens += tokens_per_dp_rank
         torch.cuda.synchronize()
-        dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG, group=self.dp_group)
-        self.one_step_results["val_loss"] = val_loss_accum
+        dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM, group=self.dp_group)
+        dist.all_reduce(val_valid_tokens, op=dist.ReduceOp.SUM, group=self.dp_group)
+        self.one_step_results["val_loss"] = val_loss_sum / val_valid_tokens.clamp(min=1.0)
     
     def save(self, step: int | None = None):
         # optionally write model checkpoints
