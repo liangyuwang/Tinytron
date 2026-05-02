@@ -143,6 +143,7 @@ class MoE(nn.Module):
         self.last_measurement_input = None
         self.last_measurement_q = None
         self.last_warmup_selected_experts = None
+        self.last_router_rank_loss = None
 
         if dist.is_available() and dist.is_initialized():
             try:
@@ -191,6 +192,7 @@ class MoE(nn.Module):
         self.last_measurement_input = None
         self.last_measurement_q = None
         self.last_warmup_selected_experts = None
+        self.last_router_rank_loss = None
 
     def set_forced_routing(
         self,
@@ -306,9 +308,9 @@ class MoE(nn.Module):
         )
         return out.view(B, T, self.num_experts, D)
 
-    def prepare_warmup_routing(
+    def _prepare_warmup_routing_from_reference_grad(
         self,
-        reference_grad: torch.Tensor,
+        reference_grad: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if (
             self.last_full_expert_outputs is None
@@ -331,6 +333,13 @@ class MoE(nn.Module):
             tau=self.router_ranking_tau,
         )
         return loss * self.router_ranking_loss_weight
+
+    def _capture_reference_grad(self, reference_grad: torch.Tensor) -> torch.Tensor:
+        self.last_router_rank_loss = self._prepare_warmup_routing_from_reference_grad(reference_grad)
+        self.last_full_expert_outputs = None
+        self.last_reference_output = None
+        self.last_measurement_input = None
+        return torch.zeros_like(reference_grad)
 
     def _forward_sep_local_reduce_inference(
         self,
@@ -511,6 +520,9 @@ class MoE(nn.Module):
             self.last_full_expert_outputs = all_outputs.detach()
             self.last_reference_output = reference_output
             self.last_measurement_input = x.detach()
+            self.last_router_rank_loss = None
+            if reference_output.requires_grad:
+                reference_output.register_hook(self._capture_reference_grad)
             self.last_router_probe_loss = None
             self._record_routing_stats(
                 gate_logits=None,

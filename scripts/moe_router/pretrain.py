@@ -210,11 +210,15 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             allow_unused=True,
         )
 
-        rank_losses = []
-        for moe, reference_grad in zip(moe_layers, reference_grads):
-            rank_loss = moe.prepare_warmup_routing(reference_grad)
-            if rank_loss is not None:
-                rank_losses.append(rank_loss)
+        # reference_grads is intentionally unused. autograd.grad is used to
+        # trigger each MoE reference-output hook, where q/top-k/rank-loss are
+        # produced and full-expert measurement activations are released.
+        del reference_grads
+        rank_losses = [
+            moe.last_router_rank_loss
+            for moe in moe_layers
+            if moe.last_router_rank_loss is not None
+        ]
 
         rank_loss_accum = None
         if rank_losses:
