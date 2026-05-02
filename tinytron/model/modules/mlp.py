@@ -41,6 +41,71 @@ class MLP(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
+class MoERouter(nn.Module):
+    def __init__(self, hidden_size: int, num_experts: int, device):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_experts = num_experts
+        self.weight = nn.Parameter(torch.empty(num_experts, hidden_size, device=device))
+        self.forced_selected_experts: torch.Tensor | None = None
+        self.forced_weights: torch.Tensor | None = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight)
+
+    def set_forced_routing(
+        self,
+        selected_experts: torch.Tensor,
+        weights: torch.Tensor | None = None,
+    ) -> None:
+        self.forced_selected_experts = selected_experts.detach()
+        self.forced_weights = None if weights is None else weights.detach()
+
+    def clear_forced_routing(self) -> None:
+        self.forced_selected_experts = None
+        self.forced_weights = None
+
+    def has_forced_routing(self) -> bool:
+        return self.forced_selected_experts is not None
+
+    def route_forced(
+        self,
+        x: torch.Tensor,
+        top_k: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        selected_experts = self.forced_selected_experts
+        if selected_experts is None:
+            raise RuntimeError("Forced routing was requested without selected experts.")
+        B, T, _ = x.size()
+        if tuple(selected_experts.shape) != (B, T, top_k):
+            raise ValueError(
+                "Forced routing shape mismatch: "
+                f"expected {(B, T, top_k)}, got {tuple(selected_experts.shape)}"
+            )
+        selected_experts = selected_experts.to(device=x.device, dtype=torch.long)
+        if self.forced_weights is None:
+            weights = x.new_full((B, T, top_k), 1.0 / top_k)
+        else:
+            if tuple(self.forced_weights.shape) != (B, T, top_k):
+                raise ValueError(
+                    "Forced routing weight shape mismatch: "
+                    f"expected {(B, T, top_k)}, got {tuple(self.forced_weights.shape)}"
+                )
+            weights = self.forced_weights.to(device=x.device, dtype=x.dtype)
+        return weights, selected_experts
+
+    def ranking_loss(
+        self,
+        x: torch.Tensor,
+        q_target: torch.Tensor,
+        tau: float,
+    ) -> torch.Tensor:
+        logits = self(x.detach())
+        target = F.softmax(q_target.detach().to(torch.float32) / max(float(tau), 1e-6), dim=-1)
+        log_probs = F.log_softmax(logits.to(torch.float32), dim=-1)
+        return F.kl_div(log_probs, target, reduction="batchmean")
+
+
 class MoE(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int, top_k: int | None = None):
         super().__init__()
@@ -63,15 +128,21 @@ class MoE(nn.Module):
             print(f"⚠️ [Performance Warning] torch.nn.functional.grouped_mm is NOT supported or hardware requirements (SM >= 8.0) are not met."
                   f"MoE will fallback to the padded batched matmul loop (Slow Path).")
 
-        self.router = nn.Linear(self.hidden_size, self.num_experts, bias=False, device=self.device)
+        self.router = MoERouter(self.hidden_size, self.num_experts, device=self.device)
         # Runtime knobs used by scripts/moe_router. They default to the standard
         # learned top-k router so existing training scripts are unchanged.
         self.routing_strategy = "learned"
         self.router_probe_experts = 0
         self.router_probe_tokens = 0
         self.router_ranking_loss_weight = 0.0
+        self.router_ranking_tau = 1.0
         self.last_router_probe_loss = None
         self.last_routing_stats = {}
+        self.last_full_expert_outputs = None
+        self.last_reference_output = None
+        self.last_measurement_input = None
+        self.last_measurement_q = None
+        self.last_warmup_selected_experts = None
 
         if dist.is_available() and dist.is_initialized():
             try:
@@ -112,6 +183,21 @@ class MoE(nn.Module):
         with torch.random.fork_rng(devices=[self.router.weight.device]):
             torch.manual_seed(base_seed + layer_idx)
             nn.init.normal_(self.router.weight, mean=0.0, std=self.config.init_std)
+
+    def clear_warmup_state(self) -> None:
+        self.router.clear_forced_routing()
+        self.last_full_expert_outputs = None
+        self.last_reference_output = None
+        self.last_measurement_input = None
+        self.last_measurement_q = None
+        self.last_warmup_selected_experts = None
+
+    def set_forced_routing(
+        self,
+        selected_experts: torch.Tensor,
+        weights: torch.Tensor | None = None,
+    ) -> None:
+        self.router.set_forced_routing(selected_experts, weights)
 
     def _apply_local_experts(
         self,
@@ -192,6 +278,60 @@ class MoE(nn.Module):
 
         return self._apply_local_experts(flat_x, selected_experts)
 
+    def _apply_all_experts(
+        self,
+        x: torch.Tensor,
+        ep_group,
+        ep_world_size: int,
+    ) -> torch.Tensor:
+        B, T, D = x.size()
+        num_tokens = B * T
+        flat_x = (
+            x.reshape(num_tokens, D)
+            .unsqueeze(1)
+            .expand(num_tokens, self.num_experts, D)
+            .reshape(num_tokens * self.num_experts, D)
+        )
+        all_experts = (
+            torch.arange(self.num_experts, device=x.device, dtype=torch.long)
+            .unsqueeze(0)
+            .expand(num_tokens, self.num_experts)
+            .reshape(-1)
+        )
+        out = self._apply_experts(
+            flat_x,
+            all_experts,
+            ep_group=ep_group,
+            ep_world_size=ep_world_size,
+        )
+        return out.view(B, T, self.num_experts, D)
+
+    def prepare_warmup_routing(
+        self,
+        reference_grad: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if (
+            self.last_full_expert_outputs is None
+            or self.last_measurement_input is None
+            or reference_grad is None
+        ):
+            return None
+        expert_outputs = self.last_full_expert_outputs.to(torch.float32)
+        grad = reference_grad.detach().to(torch.float32)
+        q = -(expert_outputs * grad.unsqueeze(2)).sum(dim=-1)
+        selected_experts = torch.topk(q, self.top_k, dim=-1).indices
+        self.last_measurement_q = q.detach()
+        self.last_warmup_selected_experts = selected_experts.detach()
+        self.set_forced_routing(selected_experts)
+        if self.router_ranking_loss_weight <= 0.0:
+            return None
+        loss = self.router.ranking_loss(
+            self.last_measurement_input,
+            q,
+            tau=self.router_ranking_tau,
+        )
+        return loss * self.router_ranking_loss_weight
+
     def _forward_sep_local_reduce_inference(
         self,
         x: torch.Tensor,
@@ -230,6 +370,10 @@ class MoE(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         B, T, _ = x.size()
         num_tokens = B * T
+
+        if self.router.has_forced_routing():
+            weights, selected_experts = self.router.route_forced(x, self.top_k)
+            return weights, selected_experts, None
 
         if self.routing_strategy == "learned":
             assert gate_logits is not None
@@ -361,7 +505,28 @@ class MoE(nn.Module):
             ep_group = None
             ep_world_size = 1
             ep_rank = 0
-        gate_logits = self.router(x) if self.routing_strategy == "learned" else None
+        if self.routing_strategy == "full_observation":
+            all_outputs = self._apply_all_experts(x, ep_group, ep_world_size)
+            reference_output = all_outputs.mean(dim=2)
+            self.last_full_expert_outputs = all_outputs.detach()
+            self.last_reference_output = reference_output
+            self.last_measurement_input = x.detach()
+            self.last_router_probe_loss = None
+            self._record_routing_stats(
+                gate_logits=None,
+                selected_experts=(
+                    torch.arange(self.num_experts, device=x.device, dtype=torch.long)
+                    .view(1, 1, self.num_experts)
+                    .expand(B, T, self.num_experts)
+                ),
+            )
+            return reference_output, None, None
+
+        gate_logits = (
+            self.router(x)
+            if self.routing_strategy == "learned" and not self.router.has_forced_routing()
+            else None
+        )
         weights, selected_experts, gate_logits_for_loss = self._route(x, gate_logits)
         self._record_routing_stats(gate_logits_for_loss, selected_experts)
         selected_experts_for_probe = selected_experts

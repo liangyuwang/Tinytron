@@ -13,6 +13,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tinytron.training import build_config, build_parser
+from tinytron.distributed import allreduce_non_expert_grads_across_sp
+from tinytron.model.gpt import EXPERT_LOCAL_PARAM_SUFFIXES
 from scripts.example import pretrain as example_pretrain
 
 
@@ -20,7 +22,7 @@ from scripts.example import pretrain as example_pretrain
 class RouterExperimentConfig:
     router_warmup_steps: int = 100
     router_bootstrap_steps: int = 100
-    warmup_routing_strategy: str = "round_robin"
+    warmup_routing_strategy: str = "measurement_topk"
     router_probe_experts: int = 2
     router_probe_tokens: int = 128
     router_ranking_loss_weight: float = 0.01
@@ -60,8 +62,12 @@ def parse_args():
         "--warmup_routing_strategy",
         type=str,
         default=defaults.warmup_routing_strategy,
-        choices=["random", "round_robin"],
-        help="Non-semantic expert assignment used before learned router ranking starts.",
+        choices=["measurement_topk", "random", "round_robin"],
+        help=(
+            "Warmup routing policy. measurement_topk uses a two-pass full-observation "
+            "measurement to choose forced top-k experts and train router ranking; "
+            "random/round_robin keep the legacy non-semantic sparse warmup."
+        ),
     )
     g.add_argument("--router_probe_experts", type=int, default=defaults.router_probe_experts)
     g.add_argument("--router_probe_tokens", type=int, default=defaults.router_probe_tokens)
@@ -103,10 +109,18 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         phase = "warmup" if in_warmup else ("bootstrap" if in_bootstrap else "joint")
 
         if in_warmup:
-            routing_strategy = self.router_exp.warmup_routing_strategy
-            router_trainable = False
+            routing_strategy = (
+                "full_observation"
+                if self.router_exp.warmup_routing_strategy == "measurement_topk"
+                else self.router_exp.warmup_routing_strategy
+            )
+            router_trainable = self.router_exp.warmup_routing_strategy == "measurement_topk"
             experts_trainable = True
-            ranking_loss_weight = 0.0
+            ranking_loss_weight = (
+                0.0
+                if self.router_exp.disable_probe_ranking
+                else self.router_exp.router_ranking_loss_weight
+            )
         else:
             routing_strategy = "learned"
             router_trainable = True
@@ -121,6 +135,26 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             moe.router_probe_tokens = int(self.router_exp.router_probe_tokens)
             moe.router_ranking_loss_weight = float(ranking_loss_weight)
         return phase
+
+    def _set_moe_routing_strategy(self, routing_strategy: str):
+        for moe in self._iter_moe_layers():
+            moe.routing_strategy = routing_strategy
+
+    def _clear_moe_warmup_state(self):
+        for moe in self._iter_moe_layers():
+            if hasattr(moe, "clear_warmup_state"):
+                moe.clear_warmup_state()
+
+    @torch.no_grad()
+    def _allreduce_router_grads_across_dp(self):
+        if self.dp_world_size <= 1:
+            return
+        for moe in self._iter_moe_layers():
+            for param in moe.router.parameters():
+                if param.grad is None:
+                    continue
+                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=self.dp_group)
+                param.grad.div_(self.dp_world_size)
 
     def _mean_metric(self, values: list[torch.Tensor | float]) -> torch.Tensor | None:
         if not values:
@@ -152,9 +186,106 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         if probe_loss is not None:
             self.one_step_results["moe/probe_rank_loss"] = probe_loss
 
+    def _one_measurement_topk_warmup_micro_step(self, config, micro_step: int, data_batch: dict):
+        x, y = self._prepare_local_batch(data_batch)
+        valid_token_count = (y != -100).sum().detach()
+        tokens_per_dp_rank = valid_token_count.to(dtype=torch.float32)
+        dist.all_reduce(tokens_per_dp_rank, op=dist.ReduceOp.SUM, group=self.sp_group)
+        tokens_per_ddp_group = tokens_per_dp_rank.clone()
+        dist.all_reduce(tokens_per_ddp_group, op=dist.ReduceOp.SUM, group=self.dp_group)
+        loss_weight = tokens_per_dp_rank * self.dp_world_size / tokens_per_ddp_group.clamp(min=1.0)
+
+        self._clear_moe_warmup_state()
+        self._set_moe_routing_strategy("full_observation")
+        with self.profiler_record_fn("warmup_measurement_forward"):
+            with self._autocast_context(config.train.precision):
+                _, ref_loss, _ = self.model(x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1))
+
+        moe_layers = list(self._iter_moe_layers())
+        reference_outputs = [moe.last_reference_output for moe in moe_layers]
+        reference_grads = torch.autograd.grad(
+            ref_loss,
+            reference_outputs,
+            retain_graph=False,
+            allow_unused=True,
+        )
+
+        rank_losses = []
+        for moe, reference_grad in zip(moe_layers, reference_grads):
+            rank_loss = moe.prepare_warmup_routing(reference_grad)
+            if rank_loss is not None:
+                rank_losses.append(rank_loss)
+
+        rank_loss_accum = None
+        if rank_losses:
+            rank_loss_accum = torch.stack(rank_losses).mean()
+            rank_loss = (
+                rank_loss_accum
+                * loss_weight.to(dtype=rank_loss_accum.dtype)
+                / self.training_info["grad_accum_steps"]
+            )
+            with self.profiler_record_fn("warmup_router_backward"):
+                rank_loss.backward()
+
+        self._set_moe_routing_strategy("forced")
+        with self.profiler_record_fn("warmup_topk_forward"):
+            with self._autocast_context(config.train.precision):
+                _, loss, logging_loss = self.model(x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1))
+        loss = loss * loss_weight.to(dtype=loss.dtype) / self.training_info["grad_accum_steps"]
+        with self.profiler_record_fn("warmup_topk_backward"):
+            loss.backward()
+        logging_loss = logging_loss * loss_weight.to(dtype=logging_loss.dtype) / self.training_info["grad_accum_steps"]
+        self._clear_moe_warmup_state()
+        return logging_loss, valid_token_count, rank_loss_accum
+
+    def _one_measurement_topk_warmup_step(self, config, step: int):
+        self.model.train()
+        self.optimizer.zero_grad()
+        loss_accum = 0.0
+        router_rank_loss_accum = []
+        valid_tokens_accum = torch.tensor(0, device=f"cuda:{self.local_rank}", dtype=torch.long)
+        for micro_step in range(self.training_info["grad_accum_steps"]):
+            batch = self._next_train_batch()
+            self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
+            logging_loss, valid_token_count, rank_loss = self._one_measurement_topk_warmup_micro_step(
+                config,
+                micro_step,
+                batch,
+            )
+            loss_accum += logging_loss
+            valid_tokens_accum += valid_token_count
+            if rank_loss is not None:
+                router_rank_loss_accum.append(rank_loss.detach())
+
+        self._allreduce_router_grads_across_dp()
+        allreduce_non_expert_grads_across_sp(
+            model=self.raw_model,
+            sp_group=self.sp_group,
+            sp_world_size=self.sp_world_size,
+            expert_local_param_suffixes=EXPERT_LOCAL_PARAM_SUFFIXES,
+        )
+        norm = self.raw_model.clip_grad_norm(config.train.grad_clip_value)
+        lr = self._lr_scheduler(step, self.training_info["max_steps"], config.optim.warmup_steps, config.optim.max_lr, config.optim.min_lr)
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+        self.optimizer.step()
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG, group=self.dp_group)
+        dist.all_reduce(valid_tokens_accum, op=dist.ReduceOp.SUM, group=self.dp_sp_group)
+        self.one_step_results["lr"] = lr
+        self.one_step_results["loss"] = loss_accum
+        self.one_step_results["grad_norm"] = norm
+        self.one_step_results["valid_tokens"] = valid_tokens_accum
+        if router_rank_loss_accum:
+            rank_metric = torch.stack(router_rank_loss_accum).mean()
+            dist.all_reduce(rank_metric, op=dist.ReduceOp.AVG, group=self.dp_group)
+            self.one_step_results["moe/probe_rank_loss"] = rank_metric
+
     def _one_training_step(self, config, step: int):
         phase = self._configure_router_phase(step)
-        super()._one_training_step(config, step)
+        if phase == "warmup" and self.router_exp.warmup_routing_strategy == "measurement_topk":
+            self._one_measurement_topk_warmup_step(config, step)
+        else:
+            super()._one_training_step(config, step)
         self.one_step_results["moe/router_phase"] = phase
         self._collect_router_metrics()
         if self.master_process and (step % config.logging.log_every == 0):
