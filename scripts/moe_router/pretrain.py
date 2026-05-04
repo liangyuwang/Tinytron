@@ -224,7 +224,14 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         if probe_loss is not None:
             self.one_step_results["moe/probe_rank_loss"] = probe_loss
 
-    def _one_measurement_topk_warmup_micro_step(self, config, micro_step: int, data_batch: dict):
+    def _one_measurement_topk_warmup_micro_step(
+        self,
+        config,
+        micro_step: int,
+        data_batch: dict,
+        *,
+        measurement_topk_updates_model: bool,
+    ):
         x, y = self._prepare_local_batch(data_batch)
         valid_token_count = (y != -100).sum().detach()
         tokens_per_dp_rank = valid_token_count.to(dtype=torch.float32)
@@ -270,7 +277,7 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
                 for moe in moe_layers:
                     moe.accumulate_router_rank_grad(router_grad_scale)
 
-        if self.router_exp.measurement_topk_updates_model:
+        if measurement_topk_updates_model:
             self._set_moe_routing_strategy("forced")
         else:
             for moe in moe_layers:
@@ -286,7 +293,13 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         self._clear_moe_warmup_state()
         return logging_loss, valid_token_count, rank_loss_accum
 
-    def _one_measurement_topk_warmup_step(self, config, step: int):
+    def _one_measurement_topk_warmup_step(
+        self,
+        config,
+        step: int,
+        *,
+        measurement_topk_updates_model: bool,
+    ):
         self.model.train()
         self.optimizer.zero_grad()
         loss_accum = 0.0
@@ -299,6 +312,7 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
                 config,
                 micro_step,
                 batch,
+                measurement_topk_updates_model=measurement_topk_updates_model,
             )
             loss_accum += logging_loss
             valid_tokens_accum += valid_token_count
@@ -331,7 +345,16 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
     def _one_training_step(self, config, step: int):
         phase = self._configure_router_phase(step)
         if phase in {"expert_warmup", "router_training"} and self.router_exp.warmup_routing_strategy == "measurement_topk":
-            self._one_measurement_topk_warmup_step(config, step)
+            measurement_topk_updates_model = (
+                True
+                if phase == "expert_warmup"
+                else self.router_exp.measurement_topk_updates_model
+            )
+            self._one_measurement_topk_warmup_step(
+                config,
+                step,
+                measurement_topk_updates_model=measurement_topk_updates_model,
+            )
         else:
             super()._one_training_step(config, step)
         self.one_step_results["moe/router_phase"] = phase
