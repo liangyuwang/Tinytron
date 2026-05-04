@@ -20,8 +20,10 @@ from scripts.example import pretrain as example_pretrain
 
 @dataclass
 class RouterExperimentConfig:
-    router_warmup_steps: int = 100
-    router_bootstrap_steps: int = 100
+    expert_warmup_steps: int = 100
+    router_training_steps: int = 100
+    router_warmup_steps: int | None = None
+    router_bootstrap_steps: int | None = None
     warmup_routing_strategy: str = "measurement_topk"
     router_probe_experts: int = 2
     router_probe_tokens: int = 128
@@ -56,8 +58,30 @@ def parse_args():
 
     g = parser.add_argument_group("moe router experiment")
     defaults = RouterExperimentConfig()
-    g.add_argument("--router_warmup_steps", type=int, default=defaults.router_warmup_steps)
-    g.add_argument("--router_bootstrap_steps", type=int, default=defaults.router_bootstrap_steps)
+    g.add_argument(
+        "--expert_warmup_steps",
+        type=int,
+        default=defaults.expert_warmup_steps,
+        help="Two-pass measurement top-k steps that update experts/backbone while keeping router frozen.",
+    )
+    g.add_argument(
+        "--router_training_steps",
+        type=int,
+        default=defaults.router_training_steps,
+        help="Two-pass measurement top-k steps that also train router ranking after expert warmup.",
+    )
+    g.add_argument(
+        "--router_warmup_steps",
+        type=int,
+        default=None,
+        help="Deprecated alias for --expert_warmup_steps.",
+    )
+    g.add_argument(
+        "--router_bootstrap_steps",
+        type=int,
+        default=None,
+        help="Deprecated alias for --router_training_steps.",
+    )
     g.add_argument(
         "--warmup_routing_strategy",
         type=str,
@@ -102,29 +126,32 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             moe.experts_down_weights.requires_grad_(enabled)
 
     def _configure_router_phase(self, step: int) -> str:
-        warmup_steps = max(0, int(self.router_exp.router_warmup_steps))
-        bootstrap_steps = max(0, int(self.router_exp.router_bootstrap_steps))
-        in_warmup = step < warmup_steps
-        in_bootstrap = warmup_steps <= step < warmup_steps + bootstrap_steps
-        phase = "warmup" if in_warmup else ("bootstrap" if in_bootstrap else "joint")
+        expert_warmup_steps = max(0, int(self.router_exp.expert_warmup_steps))
+        router_training_steps = max(0, int(self.router_exp.router_training_steps))
+        in_expert_warmup = step < expert_warmup_steps
+        in_router_training = expert_warmup_steps <= step < expert_warmup_steps + router_training_steps
+        phase = "expert_warmup" if in_expert_warmup else ("router_training" if in_router_training else "joint")
 
-        if in_warmup:
+        if in_expert_warmup or in_router_training:
             routing_strategy = (
                 "full_observation"
                 if self.router_exp.warmup_routing_strategy == "measurement_topk"
                 else self.router_exp.warmup_routing_strategy
             )
-            router_trainable = self.router_exp.warmup_routing_strategy == "measurement_topk"
+            router_trainable = (
+                in_router_training
+                and self.router_exp.warmup_routing_strategy == "measurement_topk"
+            )
             experts_trainable = True
             ranking_loss_weight = (
                 0.0
-                if self.router_exp.disable_probe_ranking
+                if in_expert_warmup or self.router_exp.disable_probe_ranking
                 else self.router_exp.router_ranking_loss_weight
             )
         else:
             routing_strategy = "learned"
             router_trainable = True
-            experts_trainable = not (in_bootstrap and self.router_exp.bootstrap_freeze_experts)
+            experts_trainable = True
             ranking_loss_weight = 0.0 if self.router_exp.disable_probe_ranking else self.router_exp.router_ranking_loss_weight
 
         self._set_router_trainable(router_trainable)
@@ -286,7 +313,7 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
 
     def _one_training_step(self, config, step: int):
         phase = self._configure_router_phase(step)
-        if phase == "warmup" and self.router_exp.warmup_routing_strategy == "measurement_topk":
+        if phase in {"expert_warmup", "router_training"} and self.router_exp.warmup_routing_strategy == "measurement_topk":
             self._one_measurement_topk_warmup_step(config, step)
         else:
             super()._one_training_step(config, step)
@@ -304,11 +331,8 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
 
 def _needs_find_unused_parameters(router_exp: RouterExperimentConfig) -> bool:
     return (
-        router_exp.router_warmup_steps > 0
-        or (
-            router_exp.router_bootstrap_steps > 0
-            and router_exp.bootstrap_freeze_experts
-        )
+        router_exp.expert_warmup_steps > 0
+        or router_exp.router_training_steps > 0
     )
 
 
@@ -323,7 +347,20 @@ def main():
         global_skip_batches=int(args.streaming_global_skip_batches),
     )
 
+    expert_warmup_steps = (
+        args.expert_warmup_steps
+        if args.router_warmup_steps is None
+        else args.router_warmup_steps
+    )
+    router_training_steps = (
+        args.router_training_steps
+        if args.router_bootstrap_steps is None
+        else args.router_bootstrap_steps
+    )
+
     router_exp = RouterExperimentConfig(
+        expert_warmup_steps=expert_warmup_steps,
+        router_training_steps=router_training_steps,
         router_warmup_steps=args.router_warmup_steps,
         router_bootstrap_steps=args.router_bootstrap_steps,
         warmup_routing_strategy=args.warmup_routing_strategy,
