@@ -51,6 +51,9 @@ class ExpertLoadBalancingLoss(nn.Module):
         self.alpha = alpha
 
     def forward(self, gate_logits: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+        if self.alpha == 0.0:
+            return gate_logits.new_zeros(())
+
         flat_logits = gate_logits.view(-1, self.num_experts)
         if valid_mask is not None:
             flat_logits = flat_logits[valid_mask.view(-1).bool()]
