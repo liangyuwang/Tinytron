@@ -25,11 +25,11 @@ bash scripts/moe_router/pretrain.sh
 ```bash
 MODEL_SIZE=4B-A0.5B \
 LOG_DIR=scripts/moe_router/runs/full_observation_oracle_assisted \
-EXPERT_WARMUP_STEPS=0 \
-ROUTER_TRAINING_STEPS=1000 \
+EXPERT_WARMUP_STEPS=23875 \
+ROUTER_TRAINING_STEPS=0 \
 WARMUP_ROUTING_STRATEGY=measurement_topk \
 MEASUREMENT_TOPK_UPDATES_MODEL=1 \
-ROUTER_RANKING_LOSS_WEIGHT=0.01 \
+ROUTER_RANKING_LOSS_WEIGHT=0 \
 bash scripts/moe_router/pretrain.sh
 ```
 
@@ -39,7 +39,7 @@ bash scripts/moe_router/pretrain.sh
 MODEL_SIZE=4B-A0.5B \
 LOG_DIR=scripts/moe_router/runs/full_observation_router_supervision \
 EXPERT_WARMUP_STEPS=0 \
-ROUTER_TRAINING_STEPS=1000 \
+ROUTER_TRAINING_STEPS=23875 \
 WARMUP_ROUTING_STRATEGY=measurement_topk \
 MEASUREMENT_TOPK_UPDATES_MODEL=0 \
 ROUTER_RANKING_LOSS_WEIGHT=0.01 \

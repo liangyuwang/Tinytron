@@ -359,12 +359,12 @@ class MoE(nn.Module):
         else:
             param.grad.add_(scaled_grad)
 
-    def _capture_reference_grad(self, reference_grad: torch.Tensor) -> torch.Tensor:
+    def _capture_reference_grad(self, reference_grad: torch.Tensor) -> None:
         self.last_router_rank_loss = self._prepare_warmup_routing_from_reference_grad(reference_grad)
         self.last_full_expert_outputs = None
         self.last_reference_output = None
         self.last_measurement_input = None
-        return torch.zeros_like(reference_grad)
+        return None
 
     def _forward_sep_local_reduce_inference(
         self,
