@@ -50,7 +50,7 @@ bash scripts/moe_router/pretrain.sh
 
 ```bash
 MODEL_SIZE=4B-A0.5B \
-LOG_DIR=scripts/moe_router/runs/three_phase \
+LOG_DIR=scripts/moe_router/runs/two_phase \
 EXPERT_WARMUP_STEPS=0 \
 ROUTER_TRAINING_STEPS=1100 \
 WARMUP_ROUTING_STRATEGY=measurement_topk \
