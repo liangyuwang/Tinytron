@@ -1,5 +1,5 @@
 ```bash
-MODEL_SIZE=0.17B-A0.1B \
+MODEL_SIZE=4B-A0.5B \
 MAX_STEPS=1000 \
 LOG_DIR=scripts/moe_router/runs/baseline_normal_moe \
 EXPERT_WARMUP_STEPS=0 \
@@ -11,7 +11,7 @@ bash scripts/moe_router/pretrain.sh
 Equivalent form:
 
 ```bash
-MODEL_SIZE=0.17B-A0.1B \
+MODEL_SIZE=4B-A0.5B \
 MAX_STEPS=1000 \
 LOG_DIR=scripts/moe_router/runs/baseline_normal_moe \
 EXPERT_WARMUP_STEPS=0 \
@@ -23,7 +23,7 @@ bash scripts/moe_router/pretrain.sh
 ---
 
 ```bash
-MODEL_SIZE=0.17B-A0.1B \
+MODEL_SIZE=4B-A0.5B \
 MAX_STEPS=1000 \
 LOG_DIR=scripts/moe_router/runs/full_observation_ranking_oracle \
 EXPERT_WARMUP_STEPS=0 \
@@ -36,7 +36,7 @@ bash scripts/moe_router/pretrain.sh
 ---
 
 ```bash
-MODEL_SIZE=0.17B-A0.1B \
+MODEL_SIZE=4B-A0.5B \
 MAX_STEPS=1000 \
 LOG_DIR=scripts/moe_router/runs/three_phase \
 EXPERT_WARMUP_STEPS=100 \
