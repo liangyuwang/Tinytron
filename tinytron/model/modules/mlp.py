@@ -144,6 +144,7 @@ class MoE(nn.Module):
         self.last_measurement_q = None
         self.last_warmup_selected_experts = None
         self.last_router_rank_loss = None
+        self.last_router_rank_grad = None
 
         if dist.is_available() and dist.is_initialized():
             try:
@@ -193,6 +194,7 @@ class MoE(nn.Module):
         self.last_measurement_q = None
         self.last_warmup_selected_experts = None
         self.last_router_rank_loss = None
+        self.last_router_rank_grad = None
 
     def set_forced_routing(
         self,
@@ -326,19 +328,39 @@ class MoE(nn.Module):
         self.last_warmup_selected_experts = selected_experts.detach()
         self.set_forced_routing(selected_experts)
         if self.router_ranking_loss_weight <= 0.0:
+            self.last_router_rank_grad = None
             return None
-        loss = self.router.ranking_loss(
-            self.last_measurement_input,
-            q,
-            tau=self.router_ranking_tau,
-        )
-        return loss * self.router_ranking_loss_weight
+        x = self.last_measurement_input
+        with torch.no_grad():
+            logits = self.router(x).to(torch.float32)
+            target = F.softmax(q.detach().to(torch.float32) / max(float(self.router_ranking_tau), 1e-6), dim=-1)
+            log_probs = F.log_softmax(logits, dim=-1)
+            loss = -(target * log_probs).sum(dim=-1).mean() * self.router_ranking_loss_weight
+            probs = log_probs.exp()
+            num_tokens = max(1, x.numel() // self.hidden_size)
+            grad_logits = (probs - target) * (self.router_ranking_loss_weight / num_tokens)
+            grad_weight = (
+                grad_logits.reshape(-1, self.num_experts).transpose(0, 1)
+                @ x.reshape(-1, self.hidden_size).to(torch.float32)
+            )
+            self.last_router_rank_grad = grad_weight.detach()
+        return loss.detach()
+
+    def accumulate_router_rank_grad(self, scale: torch.Tensor | float) -> None:
+        grad = self.last_router_rank_grad
+        if grad is None:
+            return
+        param = self.router.weight
+        if not param.requires_grad:
+            return
+        scaled_grad = grad.to(device=param.device, dtype=param.dtype) * scale
+        if param.grad is None:
+            param.grad = scaled_grad.clone()
+        else:
+            param.grad.add_(scaled_grad)
 
     def _capture_reference_grad(self, reference_grad: torch.Tensor) -> torch.Tensor:
-        # Backward hooks run with grad mode disabled. Re-enable it so the
-        # router-local ranking loss builds a graph to router.weight.
-        with torch.enable_grad():
-            self.last_router_rank_loss = self._prepare_warmup_routing_from_reference_grad(reference_grad)
+        self.last_router_rank_loss = self._prepare_warmup_routing_from_reference_grad(reference_grad)
         self.last_full_expert_outputs = None
         self.last_reference_output = None
         self.last_measurement_input = None
@@ -524,6 +546,7 @@ class MoE(nn.Module):
             self.last_reference_output = reference_output
             self.last_measurement_input = x.detach()
             self.last_router_rank_loss = None
+            self.last_router_rank_grad = None
             if reference_output.requires_grad:
                 reference_output.register_hook(self._capture_reference_grad)
             self.last_router_probe_loss = None

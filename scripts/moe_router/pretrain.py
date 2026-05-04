@@ -250,13 +250,14 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         rank_loss_accum = None
         if rank_losses:
             rank_loss_accum = torch.stack(rank_losses).mean()
-            rank_loss = (
-                rank_loss_accum
-                * loss_weight.to(dtype=rank_loss_accum.dtype)
+            router_grad_scale = (
+                loss_weight.to(dtype=torch.float32)
                 / self.training_info["grad_accum_steps"]
+                / len(rank_losses)
             )
-            with self.profiler_record_fn("warmup_router_backward"):
-                rank_loss.backward()
+            with self.profiler_record_fn("warmup_router_grad"):
+                for moe in moe_layers:
+                    moe.accumulate_router_rank_grad(router_grad_scale)
 
         self._set_moe_routing_strategy("forced")
         with self.profiler_record_fn("warmup_topk_forward"):
