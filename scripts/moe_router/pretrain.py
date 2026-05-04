@@ -28,6 +28,7 @@ class RouterExperimentConfig:
     router_probe_experts: int = 2
     router_probe_tokens: int = 128
     router_ranking_loss_weight: float = 0.01
+    measurement_topk_updates_model: bool = True
     bootstrap_freeze_experts: bool = False
     disable_probe_ranking: bool = False
 
@@ -96,6 +97,16 @@ def parse_args():
     g.add_argument("--router_probe_experts", type=int, default=defaults.router_probe_experts)
     g.add_argument("--router_probe_tokens", type=int, default=defaults.router_probe_tokens)
     g.add_argument("--router_ranking_loss_weight", type=float, default=defaults.router_ranking_loss_weight)
+    g.add_argument(
+        "--measurement_topk_updates_model",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.measurement_topk_updates_model,
+        help=(
+            "If enabled, the second pass uses measurement-selected top-k experts "
+            "(oracle-assisted model update). If disabled, measurement only trains "
+            "router ranking and the second pass uses learned router top-k."
+        ),
+    )
     g.add_argument("--bootstrap_freeze_experts", action="store_true")
     g.add_argument("--disable_probe_ranking", action="store_true")
     return parser.parse_args()
@@ -259,7 +270,12 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
                 for moe in moe_layers:
                     moe.accumulate_router_rank_grad(router_grad_scale)
 
-        self._set_moe_routing_strategy("forced")
+        if self.router_exp.measurement_topk_updates_model:
+            self._set_moe_routing_strategy("forced")
+        else:
+            for moe in moe_layers:
+                moe.router.clear_forced_routing()
+            self._set_moe_routing_strategy("learned")
         with self.profiler_record_fn("warmup_topk_forward"):
             with self._autocast_context(config.train.precision):
                 _, loss, logging_loss = self.model(x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1))
@@ -368,6 +384,7 @@ def main():
         router_probe_experts=args.router_probe_experts,
         router_probe_tokens=args.router_probe_tokens,
         router_ranking_loss_weight=args.router_ranking_loss_weight,
+        measurement_topk_updates_model=bool(args.measurement_topk_updates_model),
         bootstrap_freeze_experts=bool(args.bootstrap_freeze_experts),
         disable_probe_ranking=bool(args.disable_probe_ranking),
     )
