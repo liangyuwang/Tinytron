@@ -335,7 +335,10 @@ class MoE(nn.Module):
         return loss * self.router_ranking_loss_weight
 
     def _capture_reference_grad(self, reference_grad: torch.Tensor) -> torch.Tensor:
-        self.last_router_rank_loss = self._prepare_warmup_routing_from_reference_grad(reference_grad)
+        # Backward hooks run with grad mode disabled. Re-enable it so the
+        # router-local ranking loss builds a graph to router.weight.
+        with torch.enable_grad():
+            self.last_router_rank_loss = self._prepare_warmup_routing_from_reference_grad(reference_grad)
         self.last_full_expert_outputs = None
         self.last_reference_output = None
         self.last_measurement_input = None
