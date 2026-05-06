@@ -29,6 +29,7 @@ class RouterExperimentConfig:
     router_probe_tokens: int = 128
     router_ranking_loss_weight: float = 0.01
     measurement_topk_updates_model: bool = True
+    measurement_diagonal_backward_attention: bool = False
     bootstrap_freeze_experts: bool = False
     disable_probe_ranking: bool = False
 
@@ -107,6 +108,15 @@ def parse_args():
             "router ranking and the second pass uses learned router top-k."
         ),
     )
+    g.add_argument(
+        "--measurement_diagonal_backward_attention",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.measurement_diagonal_backward_attention,
+        help=(
+            "Use a measurement-only attention backward that blocks future-token "
+            "losses from flowing into earlier tokens through off-diagonal K/V paths."
+        ),
+    )
     g.add_argument("--bootstrap_freeze_experts", action="store_true")
     g.add_argument("--disable_probe_ranking", action="store_true")
     return parser.parse_args()
@@ -124,6 +134,12 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             mlp = getattr(block, "mlp", None)
             if mlp is not None and hasattr(mlp, "routing_strategy"):
                 yield mlp
+
+    def _iter_attention_layers(self):
+        for block in self.raw_model.blocks:
+            attn = getattr(block, "attn", None)
+            if attn is not None and hasattr(attn, "diagonal_backward"):
+                yield attn
 
     def _set_router_trainable(self, enabled: bool):
         for moe in self._iter_moe_layers():
@@ -177,6 +193,10 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
     def _set_moe_routing_strategy(self, routing_strategy: str):
         for moe in self._iter_moe_layers():
             moe.routing_strategy = routing_strategy
+
+    def _set_attention_diagonal_backward(self, enabled: bool):
+        for attn in self._iter_attention_layers():
+            attn.diagonal_backward = enabled
 
     def _clear_moe_warmup_state(self):
         for moe in self._iter_moe_layers():
@@ -242,18 +262,24 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
 
         self._clear_moe_warmup_state()
         self._set_moe_routing_strategy("full_observation")
-        with self.profiler_record_fn("warmup_measurement_forward"):
-            with self._autocast_context(config.train.precision):
-                _, ref_loss, _ = self.model(x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1))
-
-        moe_layers = list(self._iter_moe_layers())
-        reference_outputs = [moe.last_reference_output for moe in moe_layers]
-        reference_grads = torch.autograd.grad(
-            ref_loss,
-            reference_outputs,
-            retain_graph=False,
-            allow_unused=True,
+        self._set_attention_diagonal_backward(
+            bool(self.router_exp.measurement_diagonal_backward_attention)
         )
+        try:
+            with self.profiler_record_fn("warmup_measurement_forward"):
+                with self._autocast_context(config.train.precision):
+                    _, ref_loss, _ = self.model(x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1))
+
+            moe_layers = list(self._iter_moe_layers())
+            reference_outputs = [moe.last_reference_output for moe in moe_layers]
+            reference_grads = torch.autograd.grad(
+                ref_loss,
+                reference_outputs,
+                retain_graph=False,
+                allow_unused=True,
+            )
+        finally:
+            self._set_attention_diagonal_backward(False)
 
         # reference_grads is intentionally unused. autograd.grad is used to
         # trigger each MoE reference-output hook, where q/top-k/rank-loss are
@@ -408,6 +434,7 @@ def main():
         router_probe_tokens=args.router_probe_tokens,
         router_ranking_loss_weight=args.router_ranking_loss_weight,
         measurement_topk_updates_model=bool(args.measurement_topk_updates_model),
+        measurement_diagonal_backward_attention=bool(args.measurement_diagonal_backward_attention),
         bootstrap_freeze_experts=bool(args.bootstrap_freeze_experts),
         disable_probe_ranking=bool(args.disable_probe_ranking),
     )

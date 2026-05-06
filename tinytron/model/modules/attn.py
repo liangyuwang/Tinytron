@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+import math
 
 from tinytron.model.config import ModelConfig
 from tinytron.distributed import (
@@ -95,6 +96,61 @@ def build_cache_causal_mask(
     return key_positions <= query_positions
 
 
+def diagonal_backward_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_mask: torch.Tensor | None = None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+) -> torch.Tensor:
+    """
+    Attention with normal forward values but diagonal-only K/V backward.
+
+    This is intended for MoE full-observation measurement. Forward matches
+    causal attention, while backward prevents future-token losses from flowing
+    into earlier tokens through off-diagonal K/V paths.
+    """
+    T_q = q.size(-2)
+    T_k = k.size(-2)
+    if T_q != T_k:
+        raise ValueError(
+            "diagonal_backward_attention currently requires query and key "
+            f"lengths to match, got query={T_q}, key={T_k}."
+        )
+
+    scale = 1.0 / math.sqrt(q.size(-1))
+    k_detached = k.detach()
+    scores = torch.matmul(q, k_detached.transpose(-2, -1)) * scale
+
+    # Restore live gradients only for the score diagonal. The forward value of
+    # this term is zero, but it reconnects K_i to row i.
+    diag_delta = (q * (k - k_detached)).sum(dim=-1) * scale
+    scores = scores + torch.diag_embed(diag_delta)
+
+    if is_causal:
+        causal_mask = torch.ones((T_q, T_k), device=q.device, dtype=torch.bool).tril()
+        scores = scores.masked_fill(~causal_mask, torch.finfo(scores.dtype).min)
+
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            scores = scores.masked_fill(~attn_mask, torch.finfo(scores.dtype).min)
+        else:
+            scores = scores + attn_mask
+
+    probs = F.softmax(scores.to(torch.float32), dim=-1).to(dtype=q.dtype)
+    if dropout_p > 0.0:
+        probs = F.dropout(probs, p=dropout_p, training=True)
+
+    v_detached = v.detach()
+    out = torch.matmul(probs, v_detached)
+
+    # Restore live V gradients only from each token's own attention row.
+    diag_probs = probs.diagonal(dim1=-2, dim2=-1)
+    out = out + diag_probs.unsqueeze(-1) * (v - v_detached)
+    return out
+
+
 def _is_paged_kv_cache(past_kv) -> bool:
     return hasattr(past_kv, "append") and hasattr(past_kv, "get_kv") and hasattr(past_kv, "current_length")
 
@@ -115,6 +171,7 @@ class Attention(nn.Module):
         self.dropout = config.dropout
         self.pos = None
         self.attn_fn = F.scaled_dot_product_attention
+        self.diagonal_backward = False
         self.q_proj_heads = self.num_attention_heads
         self.kv_proj_heads = self.num_key_value_heads
         if self.inference_shard_qkv:
@@ -415,10 +472,20 @@ class Attention(nn.Module):
             v_local=v_local,
             past_kv=past_kv,
         )
-        y = self.attn_fn(
-            q_local, k_local, v_local,
-            attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
-        )
+        if self.diagonal_backward:
+            y = diagonal_backward_attention(
+                q_local,
+                k_local,
+                v_local,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+            )
+        else:
+            y = self.attn_fn(
+                q_local, k_local, v_local,
+                attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
+            )
 
         y = self._finalize_attention_output(
             y=y,
