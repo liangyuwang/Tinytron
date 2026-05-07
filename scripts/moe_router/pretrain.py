@@ -28,6 +28,7 @@ class RouterExperimentConfig:
     router_probe_experts: int = 2
     router_probe_tokens: int = 128
     router_ranking_loss_weight: float = 0.01
+    router_ranking_lr_mult: float = 1.0
     measurement_topk_updates_model: bool = True
     router_lm_grad_in_router_training: bool = False
     measurement_diagonal_backward_attention: bool = False
@@ -99,6 +100,12 @@ def parse_args():
     g.add_argument("--router_probe_experts", type=int, default=defaults.router_probe_experts)
     g.add_argument("--router_probe_tokens", type=int, default=defaults.router_probe_tokens)
     g.add_argument("--router_ranking_loss_weight", type=float, default=defaults.router_ranking_loss_weight)
+    g.add_argument(
+        "--router_ranking_lr_mult",
+        type=float,
+        default=defaults.router_ranking_lr_mult,
+        help="LR multiplier used only for the router ranking measurement substep.",
+    )
     g.add_argument(
         "--router_lm_grad_in_router_training",
         action=argparse.BooleanOptionalAction,
@@ -439,8 +446,9 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         )
         router_norm = self.raw_model.clip_grad_norm(config.train.grad_clip_value)
         lr = self._lr_scheduler(step, self.training_info["max_steps"], config.optim.warmup_steps, config.optim.max_lr, config.optim.min_lr)
+        router_lr = lr * float(self.router_exp.router_ranking_lr_mult)
         for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
+            param_group["lr"] = router_lr
         self.optimizer.step()
 
         self.optimizer.zero_grad()
@@ -475,6 +483,10 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG, group=self.dp_group)
         dist.all_reduce(valid_tokens_accum, op=dist.ReduceOp.SUM, group=self.dp_sp_group)
         self.one_step_results["lr"] = lr
+        self.one_step_results["moe/router_lr"] = torch.tensor(
+            router_lr,
+            device=f"cuda:{self.local_rank}",
+        )
         self.one_step_results["loss"] = loss_accum
         self.one_step_results["grad_norm"] = model_norm
         self.one_step_results["moe/router_grad_norm"] = router_norm
@@ -507,7 +519,7 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         self._collect_router_metrics()
         if self.master_process and (step % config.logging.log_every == 0):
             extras = []
-            for name in ("moe/router_entropy", "moe/load_entropy", "moe/load_max", "moe/probe_rank_loss", "moe/router_lm_grad_enabled"):
+            for name in ("moe/router_entropy", "moe/load_entropy", "moe/load_max", "moe/probe_rank_loss", "moe/router_lr", "moe/router_lm_grad_enabled"):
                 value = self.one_step_results.get(name)
                 if value is not None:
                     extras.append(f"{name.split('/')[-1]}={value.item():.4f}")
@@ -553,6 +565,7 @@ def main():
         router_probe_experts=args.router_probe_experts,
         router_probe_tokens=args.router_probe_tokens,
         router_ranking_loss_weight=args.router_ranking_loss_weight,
+        router_ranking_lr_mult=args.router_ranking_lr_mult,
         measurement_topk_updates_model=bool(args.measurement_topk_updates_model),
         router_lm_grad_in_router_training=bool(args.router_lm_grad_in_router_training),
         measurement_diagonal_backward_attention=bool(args.measurement_diagonal_backward_attention),

@@ -1,3 +1,13 @@
+## Router Ranking LR
+
+`ROUTER_RANKING_LR_MULT` changes only the measurement/router substep learning rate:
+
+```text
+router_lr = base_lr * ROUTER_RANKING_LR_MULT
+```
+
+The actual LM substep still uses `base_lr`. This isolates the hypothesis that the router needs to track the full-observation teacher faster than the rest of the model changes.
+
 ## 1. Normal MoE Baseline
 
 ```bash
@@ -43,7 +53,8 @@ ROUTER_TRAINING_STEPS=23875 \
 WARMUP_ROUTING_STRATEGY=measurement_topk \
 MEASUREMENT_TOPK_UPDATES_MODEL=0 \
 ROUTER_LM_GRAD_IN_ROUTER_TRAINING=0 \
-ROUTER_RANKING_LOSS_WEIGHT=0.01 \
+ROUTER_RANKING_LOSS_WEIGHT=1 \
+ROUTER_RANKING_LR_MULT=1 \
 bash scripts/moe_router/pretrain.sh
 ```
 
@@ -58,6 +69,22 @@ WARMUP_ROUTING_STRATEGY=measurement_topk \
 MEASUREMENT_TOPK_UPDATES_MODEL=0 \
 ROUTER_LM_GRAD_IN_ROUTER_TRAINING=1 \
 ROUTER_RANKING_LOSS_WEIGHT=0.01 \
+ROUTER_RANKING_LR_MULT=1 \
+bash scripts/moe_router/pretrain.sh
+```
+
+Suggested LR ablation:
+
+```bash
+MODEL_SIZE=4B-A0.5B \
+LOG_DIR=scripts/moe_router/runs/full_observation_router_supervision_lr4 \
+EXPERT_WARMUP_STEPS=0 \
+ROUTER_TRAINING_STEPS=23875 \
+WARMUP_ROUTING_STRATEGY=measurement_topk \
+MEASUREMENT_TOPK_UPDATES_MODEL=0 \
+ROUTER_LM_GRAD_IN_ROUTER_TRAINING=0 \
+ROUTER_RANKING_LOSS_WEIGHT=0.01 \
+ROUTER_RANKING_LR_MULT=4 \
 bash scripts/moe_router/pretrain.sh
 ```
 
@@ -72,6 +99,7 @@ WARMUP_ROUTING_STRATEGY=measurement_topk \
 MEASUREMENT_TOPK_UPDATES_MODEL=0 \
 ROUTER_LM_GRAD_IN_ROUTER_TRAINING=0 \
 ROUTER_RANKING_LOSS_WEIGHT=0.01 \
+ROUTER_RANKING_LR_MULT=1 \
 bash scripts/moe_router/pretrain.sh
 ```
 
@@ -86,5 +114,6 @@ WARMUP_ROUTING_STRATEGY=measurement_topk \
 MEASUREMENT_TOPK_UPDATES_MODEL=0 \
 ROUTER_LM_GRAD_IN_ROUTER_TRAINING=0 \
 ROUTER_RANKING_LOSS_WEIGHT=0.01 \
+ROUTER_RANKING_LR_MULT=1 \
 bash scripts/moe_router/pretrain.sh
 ```
