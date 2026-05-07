@@ -233,6 +233,14 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             moe.router_probe_experts = router_probe_experts
             moe.router_probe_tokens = router_probe_tokens
 
+    def _forced_routing_cache_dtype(self) -> torch.dtype:
+        max_num_experts = max(moe.num_experts for moe in self._iter_moe_layers())
+        if max_num_experts <= torch.iinfo(torch.int16).max:
+            return torch.int16
+        if max_num_experts <= torch.iinfo(torch.int32).max:
+            return torch.int32
+        return torch.int64
+
     @torch.no_grad()
     def _allreduce_router_grads_across_dp(self):
         if self.dp_world_size <= 1:
@@ -274,14 +282,14 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         if probe_loss is not None:
             self.one_step_results["moe/probe_rank_loss"] = probe_loss
 
-    def _one_measurement_topk_warmup_micro_step(
+    def _measurement_topk_router_micro_step(
         self,
         config,
         micro_step: int,
         data_batch: dict,
         *,
         measurement_topk_updates_model: bool,
-    ):
+    ) -> tuple[torch.Tensor | None, torch.Tensor, list[torch.Tensor] | None]:
         x, y = self._prepare_local_batch(data_batch)
         valid_token_count = (y != -100).sum().detach()
         tokens_per_dp_rank = valid_token_count.to(dtype=torch.float32)
@@ -324,12 +332,56 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         rank_loss_accum = None
         if rank_losses:
             rank_loss_accum = torch.stack(rank_losses).mean()
+            router_grad_scale = (
+                loss_weight.to(dtype=torch.float32)
+                / self.training_info["grad_accum_steps"]
+                / len(rank_losses)
+            )
+            with self.profiler_record_fn("warmup_router_grad"):
+                for moe in moe_layers:
+                    moe.accumulate_router_rank_grad(router_grad_scale)
 
+        forced_routing_cache = None
         if measurement_topk_updates_model:
+            cache_dtype = self._forced_routing_cache_dtype()
+            forced_routing_cache = [
+                moe.last_warmup_selected_experts.detach().to(
+                    device="cpu",
+                    dtype=cache_dtype,
+                )
+                for moe in moe_layers
+            ]
+
+        self._clear_moe_warmup_state()
+        return rank_loss_accum, valid_token_count, forced_routing_cache
+
+    def _restore_forced_routing_cache(self, forced_routing_cache: list[torch.Tensor]) -> None:
+        for moe, selected_experts in zip(self._iter_moe_layers(), forced_routing_cache, strict=True):
+            moe.set_forced_routing(selected_experts)
+
+    def _actual_topk_lm_micro_step(
+        self,
+        config,
+        micro_step: int,
+        data_batch: dict,
+        *,
+        forced_routing_cache: list[torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x, y = self._prepare_local_batch(data_batch)
+        valid_token_count = (y != -100).sum().detach()
+        tokens_per_dp_rank = valid_token_count.to(dtype=torch.float32)
+        dist.all_reduce(tokens_per_dp_rank, op=dist.ReduceOp.SUM, group=self.sp_group)
+        tokens_per_ddp_group = tokens_per_dp_rank.clone()
+        dist.all_reduce(tokens_per_ddp_group, op=dist.ReduceOp.SUM, group=self.dp_group)
+        loss_weight = tokens_per_dp_rank * self.dp_world_size / tokens_per_ddp_group.clamp(min=1.0)
+
+        moe_layers = list(self._iter_moe_layers())
+        self._clear_moe_warmup_state()
+
+        if forced_routing_cache is not None:
+            self._restore_forced_routing_cache(forced_routing_cache)
             self._set_moe_routing_strategy("forced")
         else:
-            for moe in moe_layers:
-                moe.router.clear_forced_routing()
             self._set_moe_routing_strategy("learned")
         saved_probe_settings = self._disable_probe_ranking_for_moes(moe_layers)
         try:
@@ -341,18 +393,9 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
                 loss.backward()
         finally:
             self._restore_probe_ranking_for_moes(saved_probe_settings)
-        if rank_losses:
-            router_grad_scale = (
-                loss_weight.to(dtype=torch.float32)
-                / self.training_info["grad_accum_steps"]
-                / len(rank_losses)
-            )
-            with self.profiler_record_fn("warmup_router_grad"):
-                for moe in moe_layers:
-                    moe.accumulate_router_rank_grad(router_grad_scale)
         logging_loss = logging_loss * loss_weight.to(dtype=logging_loss.dtype) / self.training_info["grad_accum_steps"]
         self._clear_moe_warmup_state()
-        return logging_loss, valid_token_count, rank_loss_accum
+        return logging_loss, valid_token_count
 
     def _one_measurement_topk_warmup_step(
         self,
@@ -362,23 +405,30 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         measurement_topk_updates_model: bool,
     ):
         self.model.train()
+        batches = [
+            self._next_train_batch()
+            for _ in range(self.training_info["grad_accum_steps"])
+        ]
+
         self.optimizer.zero_grad()
-        loss_accum = 0.0
         router_rank_loss_accum = []
-        valid_tokens_accum = torch.tensor(0, device=f"cuda:{self.local_rank}", dtype=torch.long)
-        for micro_step in range(self.training_info["grad_accum_steps"]):
-            batch = self._next_train_batch()
-            self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
-            logging_loss, valid_token_count, rank_loss = self._one_measurement_topk_warmup_micro_step(
+        forced_routing_caches = [] if measurement_topk_updates_model else None
+        for micro_step, batch in enumerate(batches):
+            rank_loss, _, forced_routing_cache = self._measurement_topk_router_micro_step(
                 config,
                 micro_step,
                 batch,
                 measurement_topk_updates_model=measurement_topk_updates_model,
             )
-            loss_accum += logging_loss
-            valid_tokens_accum += valid_token_count
             if rank_loss is not None:
                 router_rank_loss_accum.append(rank_loss.detach())
+            if measurement_topk_updates_model:
+                if forced_routing_cache is None:
+                    raise RuntimeError(
+                        "measurement_topk_updates_model requires forced routing "
+                        "cache from the measurement phase."
+                    )
+                forced_routing_caches.append(forced_routing_cache)
 
         self._allreduce_router_grads_across_dp()
         allreduce_non_expert_grads_across_sp(
@@ -387,8 +437,38 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             sp_world_size=self.sp_world_size,
             expert_local_param_suffixes=EXPERT_LOCAL_PARAM_SUFFIXES,
         )
-        norm = self.raw_model.clip_grad_norm(config.train.grad_clip_value)
+        router_norm = self.raw_model.clip_grad_norm(config.train.grad_clip_value)
         lr = self._lr_scheduler(step, self.training_info["max_steps"], config.optim.warmup_steps, config.optim.max_lr, config.optim.min_lr)
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+        self.optimizer.step()
+
+        self.optimizer.zero_grad()
+        loss_accum = 0.0
+        valid_tokens_accum = torch.tensor(0, device=f"cuda:{self.local_rank}", dtype=torch.long)
+        for micro_step, batch in enumerate(batches):
+            self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
+            forced_routing_cache = (
+                None
+                if forced_routing_caches is None
+                else forced_routing_caches[micro_step]
+            )
+            logging_loss, valid_token_count = self._actual_topk_lm_micro_step(
+                config,
+                micro_step,
+                batch,
+                forced_routing_cache=forced_routing_cache,
+            )
+            loss_accum += logging_loss
+            valid_tokens_accum += valid_token_count
+
+        allreduce_non_expert_grads_across_sp(
+            model=self.raw_model,
+            sp_group=self.sp_group,
+            sp_world_size=self.sp_world_size,
+            expert_local_param_suffixes=EXPERT_LOCAL_PARAM_SUFFIXES,
+        )
+        model_norm = self.raw_model.clip_grad_norm(config.train.grad_clip_value)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
         self.optimizer.step()
@@ -396,7 +476,8 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         dist.all_reduce(valid_tokens_accum, op=dist.ReduceOp.SUM, group=self.dp_sp_group)
         self.one_step_results["lr"] = lr
         self.one_step_results["loss"] = loss_accum
-        self.one_step_results["grad_norm"] = norm
+        self.one_step_results["grad_norm"] = model_norm
+        self.one_step_results["moe/router_grad_norm"] = router_norm
         self.one_step_results["valid_tokens"] = valid_tokens_accum
         self.one_step_results["moe/router_lm_grad_enabled"] = torch.tensor(
             float(self.router_exp.router_lm_grad_in_router_training),
