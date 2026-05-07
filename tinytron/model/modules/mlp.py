@@ -136,6 +136,7 @@ class MoE(nn.Module):
         self.router_probe_tokens = 0
         self.router_ranking_loss_weight = 0.0
         self.router_ranking_tau = 1.0
+        self.detach_router_lm_grad = False
         self.last_router_probe_loss = None
         self.last_routing_stats = {}
         self.last_full_expert_outputs = None
@@ -565,6 +566,8 @@ class MoE(nn.Module):
             if self.routing_strategy == "learned" and not self.router.has_forced_routing()
             else None
         )
+        if gate_logits is not None and self.detach_router_lm_grad:
+            gate_logits = gate_logits.detach()
         weights, selected_experts, gate_logits_for_loss = self._route(x, gate_logits)
         self._record_routing_stats(gate_logits_for_loss, selected_experts)
         selected_experts_for_probe = selected_experts

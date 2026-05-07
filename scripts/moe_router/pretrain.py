@@ -29,6 +29,7 @@ class RouterExperimentConfig:
     router_probe_tokens: int = 128
     router_ranking_loss_weight: float = 0.01
     measurement_topk_updates_model: bool = True
+    router_lm_grad_in_router_training: bool = False
     measurement_diagonal_backward_attention: bool = False
     bootstrap_freeze_experts: bool = False
     disable_probe_ranking: bool = False
@@ -98,6 +99,16 @@ def parse_args():
     g.add_argument("--router_probe_experts", type=int, default=defaults.router_probe_experts)
     g.add_argument("--router_probe_tokens", type=int, default=defaults.router_probe_tokens)
     g.add_argument("--router_ranking_loss_weight", type=float, default=defaults.router_ranking_loss_weight)
+    g.add_argument(
+        "--router_lm_grad_in_router_training",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.router_lm_grad_in_router_training,
+        help=(
+            "Allow the actual LM pass to update router parameters during the "
+            "two-pass router-training phase. Disabled by default so the router "
+            "is trained only by full-observation ranking supervision."
+        ),
+    )
     g.add_argument(
         "--measurement_topk_updates_model",
         action=argparse.BooleanOptionalAction,
@@ -179,15 +190,21 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             routing_strategy = "learned"
             router_trainable = True
             experts_trainable = True
-            ranking_loss_weight = 0.0 if self.router_exp.disable_probe_ranking else self.router_exp.router_ranking_loss_weight
+            ranking_loss_weight = 0.0
 
         self._set_router_trainable(router_trainable)
         self._set_experts_trainable(experts_trainable)
+        detach_router_lm_grad = (
+            in_router_training
+            and self.router_exp.warmup_routing_strategy == "measurement_topk"
+            and not self.router_exp.router_lm_grad_in_router_training
+        )
         for moe in self._iter_moe_layers():
             moe.routing_strategy = routing_strategy
             moe.router_probe_experts = int(self.router_exp.router_probe_experts)
             moe.router_probe_tokens = int(self.router_exp.router_probe_tokens)
             moe.router_ranking_loss_weight = float(ranking_loss_weight)
+            moe.detach_router_lm_grad = detach_router_lm_grad
         return phase
 
     def _set_moe_routing_strategy(self, routing_strategy: str):
@@ -202,6 +219,19 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         for moe in self._iter_moe_layers():
             if hasattr(moe, "clear_warmup_state"):
                 moe.clear_warmup_state()
+
+    def _disable_probe_ranking_for_moes(self, moe_layers):
+        saved = []
+        for moe in moe_layers:
+            saved.append((moe, moe.router_probe_experts, moe.router_probe_tokens))
+            moe.router_probe_experts = 0
+            moe.router_probe_tokens = 0
+        return saved
+
+    def _restore_probe_ranking_for_moes(self, saved_probe_settings) -> None:
+        for moe, router_probe_experts, router_probe_tokens in saved_probe_settings:
+            moe.router_probe_experts = router_probe_experts
+            moe.router_probe_tokens = router_probe_tokens
 
     @torch.no_grad()
     def _allreduce_router_grads_across_dp(self):
@@ -294,6 +324,24 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         rank_loss_accum = None
         if rank_losses:
             rank_loss_accum = torch.stack(rank_losses).mean()
+
+        if measurement_topk_updates_model:
+            self._set_moe_routing_strategy("forced")
+        else:
+            for moe in moe_layers:
+                moe.router.clear_forced_routing()
+            self._set_moe_routing_strategy("learned")
+        saved_probe_settings = self._disable_probe_ranking_for_moes(moe_layers)
+        try:
+            with self.profiler_record_fn("warmup_topk_forward"):
+                with self._autocast_context(config.train.precision):
+                    _, loss, logging_loss = self.model(x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1))
+            loss = loss * loss_weight.to(dtype=loss.dtype) / self.training_info["grad_accum_steps"]
+            with self.profiler_record_fn("warmup_topk_backward"):
+                loss.backward()
+        finally:
+            self._restore_probe_ranking_for_moes(saved_probe_settings)
+        if rank_losses:
             router_grad_scale = (
                 loss_weight.to(dtype=torch.float32)
                 / self.training_info["grad_accum_steps"]
@@ -302,19 +350,6 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
             with self.profiler_record_fn("warmup_router_grad"):
                 for moe in moe_layers:
                     moe.accumulate_router_rank_grad(router_grad_scale)
-
-        if measurement_topk_updates_model:
-            self._set_moe_routing_strategy("forced")
-        else:
-            for moe in moe_layers:
-                moe.router.clear_forced_routing()
-            self._set_moe_routing_strategy("learned")
-        with self.profiler_record_fn("warmup_topk_forward"):
-            with self._autocast_context(config.train.precision):
-                _, loss, logging_loss = self.model(x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1))
-        loss = loss * loss_weight.to(dtype=loss.dtype) / self.training_info["grad_accum_steps"]
-        with self.profiler_record_fn("warmup_topk_backward"):
-            loss.backward()
         logging_loss = logging_loss * loss_weight.to(dtype=logging_loss.dtype) / self.training_info["grad_accum_steps"]
         self._clear_moe_warmup_state()
         return logging_loss, valid_token_count, rank_loss_accum
@@ -363,6 +398,10 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         self.one_step_results["loss"] = loss_accum
         self.one_step_results["grad_norm"] = norm
         self.one_step_results["valid_tokens"] = valid_tokens_accum
+        self.one_step_results["moe/router_lm_grad_enabled"] = torch.tensor(
+            float(self.router_exp.router_lm_grad_in_router_training),
+            device=f"cuda:{self.local_rank}",
+        )
         if router_rank_loss_accum:
             rank_metric = torch.stack(router_rank_loss_accum).mean()
             dist.all_reduce(rank_metric, op=dist.ReduceOp.AVG, group=self.dp_group)
@@ -387,7 +426,7 @@ class MoERouterExperimentTrainer(example_pretrain.OurTrainer):
         self._collect_router_metrics()
         if self.master_process and (step % config.logging.log_every == 0):
             extras = []
-            for name in ("moe/router_entropy", "moe/load_entropy", "moe/load_max", "moe/probe_rank_loss"):
+            for name in ("moe/router_entropy", "moe/load_entropy", "moe/load_max", "moe/probe_rank_loss", "moe/router_lm_grad_enabled"):
                 value = self.one_step_results.get(name)
                 if value is not None:
                     extras.append(f"{name.split('/')[-1]}={value.item():.4f}")
@@ -434,6 +473,7 @@ def main():
         router_probe_tokens=args.router_probe_tokens,
         router_ranking_loss_weight=args.router_ranking_loss_weight,
         measurement_topk_updates_model=bool(args.measurement_topk_updates_model),
+        router_lm_grad_in_router_training=bool(args.router_lm_grad_in_router_training),
         measurement_diagonal_backward_attention=bool(args.measurement_diagonal_backward_attention),
         bootstrap_freeze_experts=bool(args.bootstrap_freeze_experts),
         disable_probe_ranking=bool(args.disable_probe_ranking),
