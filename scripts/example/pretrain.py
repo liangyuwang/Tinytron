@@ -3,14 +3,20 @@ from __future__ import annotations
 import os
 import glob
 import random
+import sys
 import numpy as np
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.distributed.checkpoint import state_dict_saver, state_dict_loader
 from torch.distributed.checkpoint.filesystem import FileSystemWriter, FileSystemReader
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from tinytron.training import Trainer, build_config, build_parser
 from tinytron.training.config import Config

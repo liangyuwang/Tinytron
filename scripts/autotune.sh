@@ -7,7 +7,7 @@ BATCH_SIZES_STR=${BATCH_SIZES:-"1 2 4 8 16 32"}
 
 TARGET_STEPS=${TARGET_STEPS:-100}
 WARMUP_STEPS=${WARMUP_STEPS:-20}
-RUN_SCRIPT=${RUN_SCRIPT:-"scripts/debug_gpt_0.25b/pretrain.sh"}
+RUN_SCRIPT=${RUN_SCRIPT:-"scripts/debug/pretrain.sh"}
 
 DEBUG=${DEBUG:-0}
 
@@ -29,7 +29,7 @@ RESULTS_FILE="autotune_results.csv"
 echo "SEP_SIZE,BATCH_SIZE,AVG_TOK_SEC,STATUS" > $RESULTS_FILE
 echo -e "\n🔥 Starting Auto-Tune: Target Steps = $TARGET_STEPS (Warmup = $WARMUP_STEPS)...\n"
 
-trap 'echo "🚨 Interrupted! Cleaning up..."; pkill -f pretrain_example.py; [ -n "$TAIL_PID" ] && kill $TAIL_PID 2>/dev/null; rm -f $LOG_FILE; exit 1' INT
+trap 'echo "🚨 Interrupted! Cleaning up..."; pkill -f scripts/debug/pretrain.py; [ -n "$TAIL_PID" ] && kill $TAIL_PID 2>/dev/null; rm -f $LOG_FILE; exit 1' INT
 
 best_tok_sec=0
 best_config=""
@@ -43,6 +43,8 @@ for sp in "${SEP_SIZES[@]}"; do
 
         export SEP_SIZE=$sp
         export BATCH_SIZE=$bs
+        export LR_WARMUP_STEPS=$WARMUP_STEPS
+        export MOCK_DATA_NUM_SAMPLES=${MOCK_DATA_NUM_SAMPLES:-$((TOTAL_REQUIRED_STEPS * ${GBS:-1024} * 2))}
         bash $RUN_SCRIPT > $LOG_FILE 2>&1 &
         RUN_PID=$!
 

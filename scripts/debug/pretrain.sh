@@ -13,10 +13,10 @@
 #
 # Example for 2 nodes:
 # Node 0 (master, IP: 192.168.1.100):
-# NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 bash scripts/streaming_gpt_0.25b/pretrain.sh
+# NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 bash scripts/debug/pretrain.sh
 #
 # Node 1:
-# NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 bash scripts/streaming_gpt_0.25b/pretrain.sh
+# NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 bash scripts/debug/pretrain.sh
 
 set -euo pipefail
 
@@ -37,7 +37,7 @@ LOG_DIR=${LOG_DIR:-./log}
 
 SEED=${SEED:-1337}
 
-LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-2000}
+LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-2}
 MAX_LR=${MAX_LR:-3.6e-3}
 MIN_LR=${MIN_LR:-6e-5}
 
@@ -49,6 +49,7 @@ SEP_SIZE=${SEP_SIZE:-1}
 # Data loader
 NUM_WORKERS=${NUM_WORKERS:-2}
 PIN_MEMORY=${PIN_MEMORY:-1}
+MOCK_DATA_NUM_SAMPLES=${MOCK_DATA_NUM_SAMPLES:-12800}
 
 # Runtime switches
 USE_COMPILE=${USE_COMPILE:-1}
@@ -90,18 +91,12 @@ TRAINING_ARGS="\
  --warmup_steps $LR_WARMUP_STEPS \
  --max_epochs 1 \
  --num_workers $NUM_WORKERS \
+ --use_mock_data \
+ --mock_data_num_samples $MOCK_DATA_NUM_SAMPLES \
 "
 
 if [ $PIN_MEMORY -eq 1 ]; then
  TRAINING_ARGS="$TRAINING_ARGS --pin_memory"
-fi
-
-if [ $STREAMING_SHUFFLE -eq 1 ]; then
- TRAINING_ARGS="$TRAINING_ARGS --streaming_shuffle"
-fi
-
-if [ $STREAMING_STRICT -eq 1 ]; then
- TRAINING_ARGS="$TRAINING_ARGS --streaming_strict"
 fi
 
 if [ $DEBUG -eq 1 ]; then
@@ -228,21 +223,21 @@ case $MODEL_SIZE in
           --moe_intermediate_size 768 \
         "
         ;;
-    "2.7B-A1B"|"2.7b-a1b"|"2.7b_a1b")
+    "3B-A0.6B"|"3b-a0.6b"|"3b_a0.6b")
         MODEL_ARGS="\
           --block_size 4096 \
           --vocab_size 50304 \
           --num_layer 24 \
           --num_attention_heads 64 \
           --num_key_value_heads 8 \
-          --hidden_size 2048 \
-          --intermediate_size 8192 \
+          --hidden_size 1536 \
+          --intermediate_size 6144 \
           --tied_lm_head \
           --dropout 0.0 \
           --use_moe \
-          --num_experts 8 \
-          --num_experts_per_tok 2 \
-          --moe_intermediate_size 2048 \
+          --num_experts 32 \
+          --num_experts_per_tok 4 \
+          --moe_intermediate_size 768 \
         "
         ;;
     "14B-A4.5B"|"14b-a4.5b"|"14b_a4.5b")
@@ -281,12 +276,12 @@ case $MODEL_SIZE in
         ;;
     *)
         echo "Unknown MODEL_SIZE: $MODEL_SIZE" >&2
-        echo "Supported MODEL_SIZE values: 0.03B, 0.1B, 0.25B, 1B, 1.3B, 7B, 13B, 30B, 70B, 0.17B-A0.1B, 0.3B-A0.17B, 0.7B-A0.25B, 2.7B-A1B, 14B-A4.5B, 104B-A4.5B" >&2
+        echo "Supported MODEL_SIZE values: 0.25B, 1.3B, 7B, 13B, 30B, 70B, 0.17B-A0.1B, 3B-A0.6B, 14B-A4.5B, 104B-A4.5B" >&2
         exit 1
         ;;
 esac
 
-CMD="torchrun $DISTRIBUTED_ARGS pretrain_debug.py $TRAINING_ARGS $PARALLELISM_ARGS $MODEL_ARGS"
+CMD="torchrun $DISTRIBUTED_ARGS scripts/debug/pretrain.py $TRAINING_ARGS $PARALLELISM_ARGS $MODEL_ARGS"
 
 echo "Running command:"
 echo "$CMD"

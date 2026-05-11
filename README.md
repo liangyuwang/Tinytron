@@ -68,15 +68,12 @@ A minimal, hackable pre-training stack for GPT-style language models. This proje
 │
 ├── scripts/                                # Launch scripts
 │   ├── autotune.sh                         # Auto-tune SEP_SIZE/BATCH_SIZE by tok/sec
-│   ├── debug_gpt_0.25b/
-│   │   └── pretrain.sh                     # 0.25B debug (pretrain_debug.py)
-│   ├── debug_gpt_0.3b_a0.17b/
-│   │   └── pretrain.sh                     # 0.3B MoE debug (pretrain_debug.py)
-│   ├── example_gpt_0.25b/
-│   │   └── pretrain.sh                     # 0.25B example with custom data (pretrain_example.py)
-│
-├── pretrain_debug.py                       # Debug entry (mock data, minimal deps)
-├── pretrain_example.py                     # Example entry (custom dataset / tokenizer)
+│   ├── debug/
+│   │   ├── pretrain.sh                     # Debug launch script (mock data)
+│   │   └── pretrain.py                     # Debug entry point
+│   └── example/
+│       ├── pretrain.sh                     # Streaming-Dataloader launch script
+│       └── pretrain.py                     # Streaming-Dataloader entry point
 └── README.md
 ```
 
@@ -93,10 +90,11 @@ Install minimal runtime dependencies:
 pip install torch tqdm numpy
 ```
 
-For `pretrain_example.py`, also install:
+For `scripts/example/pretrain.py`, also install or vendor Streaming-Dataloader:
 
 ```bash
-pip install datasets transformers
+mkdir -p external
+git clone https://github.com/liangyuwang/Streaming-Dataloader.git external/streaming_dataloader
 ```
 
 ## Quick Start
@@ -107,19 +105,19 @@ pip install datasets transformers
 
 ```bash
 # Train 0.25B dense model (8 GPUs)
-bash scripts/debug_gpt_0.25b/pretrain.sh
+bash scripts/debug/pretrain.sh
 
-# Train 0.3B MoE model (8 GPUs)
-bash scripts/debug_gpt_0.3b_a0.17b/pretrain.sh
+# Train the 3B-A0.6B MoE debug model (8 GPUs)
+MODEL_SIZE=3B-A0.6B bash scripts/debug/pretrain.sh
 
 # Override SEP (sequence-expert joint) parallel size
-SEP_SIZE=2 bash scripts/debug_gpt_0.25b/pretrain.sh
+SEP_SIZE=2 bash scripts/debug/pretrain.sh
 ```
 
 **Direct command for quick testing:**
 
 ```bash
-torchrun --nproc_per_node=8 pretrain_debug.py \
+torchrun --nproc_per_node=8 scripts/debug/pretrain.py \
   --exp_name debug_test \
   --use_mock_data \
   --mock_data_num_samples 1280 \
@@ -127,6 +125,7 @@ torchrun --nproc_per_node=8 pretrain_debug.py \
   --batch_size 8 \
   --seq_len 4096 \
   --sep_size 1 \
+  --warmup_steps 2 \
   --max_epochs 1 \
   --debug
 ```
@@ -138,19 +137,19 @@ All training scripts support multi-node training via environment variables:
 ```bash
 # Node 0 (master, e.g. IP: 192.168.1.100)
 NUM_NODES=2 NODE_RANK=0 MASTER_ADDR=192.168.1.100 \
-bash scripts/debug_gpt_0.25b/pretrain.sh
+bash scripts/debug/pretrain.sh
 
 # Node 1 (worker)
 NUM_NODES=2 NODE_RANK=1 MASTER_ADDR=192.168.1.100 \
-bash scripts/debug_gpt_0.25b/pretrain.sh
+bash scripts/debug/pretrain.sh
 ```
 
 When running under some distributed training platforms, You do not need to specify --node_rank, --nnodes, or --master_addr. 'torchrun' automatically detects and uses these injected variables from 'env://' to set up distributed communication.
 
 ### 3. Custom Dataset
 
-Use the example entry point and override `_init_dataset`: see `pretrain_example.py` for a subclass that uses a real dataset and tokenizer. The base implementation (mock data) lives in `tinytron/training/trainer.py`; override it in your entry script or subclass `Trainer` and pass your dataset there.
-You can also use [Streaming-Dataloader](https://github.com/liangyuwang/Streaming-Dataloader) to build a memory-efficient streaming dataset pipeline for LLM pretraining.
+Use the example entry point at `scripts/example/pretrain.py` for a Streaming-Dataloader based training pipeline. The base implementation (mock data) lives in `tinytron/training/trainer.py`; for other datasets, override `_init_dataset` in your own entry script or subclass `Trainer` and pass your dataset there.
+You can use [Streaming-Dataloader](https://github.com/liangyuwang/Streaming-Dataloader) to build a memory-efficient streaming dataset pipeline for LLM pretraining.
 
 ### 4. Auto-Tune Throughput (`tok/sec`)
 
@@ -159,7 +158,7 @@ The repository includes an auto-tuner at `scripts/autotune.sh` to search through
 Default search space:
 - `SEP_SIZES="1 2 4 8"`
 - `BATCH_SIZES="1 2 4 8 16 32"`
-- `RUN_SCRIPT="scripts/debug_gpt_0.25b/pretrain.sh"`
+- `RUN_SCRIPT="scripts/debug/pretrain.sh"`
 
 Run with defaults:
 
@@ -174,7 +173,8 @@ SEP_SIZES="1 2 4" \
 BATCH_SIZES="4 8 16" \
 TARGET_STEPS=80 \
 WARMUP_STEPS=20 \
-RUN_SCRIPT="scripts/debug_gpt_0.3b_a0.17b/pretrain.sh" \
+RUN_SCRIPT="scripts/debug/pretrain.sh" \
+MODEL_SIZE=3B-A0.6B \
 bash scripts/autotune.sh
 ```
 
@@ -248,10 +248,15 @@ Key CLI options (see `tinytron/training/arguments.py` for full list):
 Example:
 
 ```bash
-torchrun --nproc_per_node=8 pretrain_debug.py \
+torchrun --nproc_per_node=8 scripts/debug/pretrain.py \
+  --exp_name sep_test \
+  --use_mock_data \
+  --mock_data_num_samples 1280 \
+  --total_batch_size 524288 \
   --batch_size 8 \
   --seq_len 4096 \
   --sep_size 2 \
+  --warmup_steps 2 \
   --max_epochs 1
 ```
 
@@ -326,7 +331,16 @@ MFU = (Actual FLOPs) / (Peak Hardware FLOPs)
 Enable PyTorch profiler for performance analysis:
 
 ```bash
-python pretrain_debug.py \
+torchrun --nproc_per_node=8 scripts/debug/pretrain.py \
+  --exp_name profiler_test \
+  --use_mock_data \
+  --mock_data_num_samples 4096 \
+  --total_batch_size 524288 \
+  --batch_size 8 \
+  --seq_len 4096 \
+  --sep_size 1 \
+  --warmup_steps 2 \
+  --max_epochs 1 \
   --use_profiler \
   --steps_to_profile 15 20  # profile on step 15 to 20
 ```
@@ -344,13 +358,13 @@ This generates a Chrome trace file at `<log_dir>/rank{rank}_trace.json` (for the
 --intermediate_size 4096
 ```
 
-### GPT-1B (24 layers)
+### GPT-1.3B (24 layers)
 ```bash
 --num_layer 24 \
---num_attention_heads 64 \
+--num_attention_heads 16 \
 --num_key_value_heads 8 \
 --hidden_size 2048 \
---intermediate_size 8192
+--intermediate_size 6144
 ```
 
 ### GPT-7B (32 layers)
@@ -366,7 +380,7 @@ This generates a Chrome trace file at `<log_dir>/rank{rank}_trace.json` (for the
 
 ### Custom Dataset
 
-Implement your dataset class and override `_init_dataset`: subclass `Trainer` in your entry script (e.g. `pretrain_example.py`) and set `self.train_dataset` to your dataset. Each item should provide tensors compatible with the trainer (e.g. contiguous token ids of length `seq_len+1` for causal LM).
+Implement your dataset class and override `_init_dataset`: subclass `Trainer` in your entry script (see `scripts/example/pretrain.py` for the Streaming-Dataloader variant) and set `self.train_dataset` to your dataset. Each item should provide tensors compatible with the trainer (e.g. contiguous token ids of length `seq_len+1` for causal LM).
 
 ### Custom Architecture
 
