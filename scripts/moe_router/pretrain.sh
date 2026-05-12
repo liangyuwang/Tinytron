@@ -16,8 +16,8 @@ EXP_NAME=${EXP_NAME:-full_observation_oracle_assisted}
 LOG_DIR=${LOG_DIR:-scripts/moe_router/runs/full_observation_oracle_assisted}
 
 SEED=${SEED:-1337}
-LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-1000}
-MAX_LR=${MAX_LR:-6e-4}
+LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-500} # ~2%
+MAX_LR=${MAX_LR:-3.6e-3}
 MIN_LR=${MIN_LR:-6e-5}
 
 SEQ_LEN=${SEQ_LEN:-4096}
