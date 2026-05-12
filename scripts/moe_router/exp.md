@@ -7,7 +7,7 @@ used.
 ```bash
 MODEL_SIZE=4B-A0.5B \
 EXP_NAME=baseline_normal_moe \
-LOG_DIR=scripts/moe_router/runs/baseline_normal_moe \
+LOG_DIR=scripts/moe_router/runs \
 EXPERT_WARMUP_STEPS=0 \
 ROUTER_TRAINING_STEPS=0 \
 ROUTER_RANKING_LOSS_WEIGHT=0 \
@@ -25,7 +25,7 @@ enabled here.
 ```bash
 MODEL_SIZE=4B-A0.5B \
 EXP_NAME=full_observation_oracle_assisted \
-LOG_DIR=scripts/moe_router/runs/full_observation_oracle_assisted \
+LOG_DIR=scripts/moe_router/runs \
 EXPERT_WARMUP_STEPS=23875 \
 ROUTER_TRAINING_STEPS=0 \
 WARMUP_ROUTING_STRATEGY=measurement_topk \
