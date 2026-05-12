@@ -104,7 +104,7 @@ PARALLELISM_ARGS="\
 case $MODEL_SIZE in
     "0.17B-A0.1B"|"0.17b-a0.1b"|"0.17b_a0.1b")
         MODEL_ARGS="\
-          --block_size 4096 \
+          --block_size $SEQ_LEN \
           --vocab_size 50304 \
           --num_layer 12 \
           --num_attention_heads 16 \
@@ -121,7 +121,7 @@ case $MODEL_SIZE in
         ;;
     "3B-A0.6B"|"3b-a0.6b"|"3b_a0.6b")
         MODEL_ARGS="\
-          --block_size 4096 \
+          --block_size $SEQ_LEN \
           --vocab_size 50304 \
           --num_layer 24 \
           --num_attention_heads 64 \
@@ -138,7 +138,7 @@ case $MODEL_SIZE in
         ;;
     "4B-A0.5B"|"4b-a0.5b"|"4b_a0.5b")
         MODEL_ARGS="\
-          --block_size 4096 \
+          --block_size $SEQ_LEN \
           --vocab_size 50304 \
           --num_layer 24 \
           --num_attention_heads 32 \
