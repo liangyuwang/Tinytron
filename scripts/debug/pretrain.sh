@@ -41,9 +41,9 @@ LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-2}
 MAX_LR=${MAX_LR:-3.6e-3}
 MIN_LR=${MIN_LR:-6e-5}
 
-SEQ_LEN=${SEQ_LEN:-4096}
-BATCH_SIZE=${BATCH_SIZE:-8}         # per process batch size before SEP adjustment
-GBS=${GBS:-1024}                   # global batch size in number of sequences
+SEQ_LEN=${SEQ_LEN:-1024}
+BATCH_SIZE=${BATCH_SIZE:-2}         # per process batch size before SEP adjustment
+GBS=${GBS:-128}                   # global batch size in number of sequences
 SEP_SIZE=${SEP_SIZE:-1}
 
 # Data loader
