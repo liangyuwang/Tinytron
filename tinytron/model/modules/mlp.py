@@ -161,7 +161,7 @@ class MoE(nn.Module):
         dist.all_to_all_single(recv_splits_tensor, send_splits_tensor, group=ep_group)
         send_splits, recv_splits = torch.stack([send_splits_tensor, recv_splits_tensor]).cpu().tolist()
         received_x = ep_all_to_all(sorted_x, send_splits, recv_splits, ep_group)
-        received_experts = torch.empty(sum(recv_splits), dtype=sorted_experts.dtype, device=x.device)
+        received_experts = torch.empty(sum(recv_splits), dtype=sorted_experts.dtype, device=flat_x.device)
         dist.all_to_all_single(
             received_experts, sorted_experts,
             output_split_sizes=recv_splits, input_split_sizes=send_splits, group=ep_group
