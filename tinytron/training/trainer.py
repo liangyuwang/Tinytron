@@ -359,6 +359,9 @@ class Trainer:
                 random.setstate(rng['python'])
         dist.barrier()
         torch.cuda.synchronize()
+
+    def _after_train_loop(self):
+        pass
     
     def train(self):
         self.results = {}
@@ -402,6 +405,7 @@ class Trainer:
                 with open(self.log_file, "a") as f:
                     f.write(f"{step} train {self.one_step_results['loss'].item():.6f}\n")
             self.results[step] = self.one_step_results
+        self._after_train_loop()
         dist.destroy_process_group()
 
     def eval(self):

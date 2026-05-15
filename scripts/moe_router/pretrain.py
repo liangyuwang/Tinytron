@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, replace
 import sys
+import time
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
+from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -16,6 +18,7 @@ from scripts.example import pretrain as example_pretrain
 from tinytron.distributed import allreduce_non_expert_grads_across_sp
 from tinytron.model.gpt import EXPERT_LOCAL_PARAM_SUFFIXES
 from tinytron.training import build_config, build_parser
+from tinytron.utils import compute_mfu
 
 
 @dataclass
@@ -23,6 +26,7 @@ class OracleWarmupConfig:
     expert_warmup_steps: int = 0
     warmup_routing_strategy: str = "measurement_topk"
     measurement_topk_updates_model: bool = True
+    router_training_steps: int = 0
 
 
 def parse_args():
@@ -46,7 +50,7 @@ def parse_args():
         "--router_training_steps",
         type=int,
         default=0,
-        help="Accepted for experiment-file compatibility; must remain 0 here.",
+        help="Number of router-only training steps to run after oracle-assisted expert training.",
     )
     g.add_argument(
         "--warmup_routing_strategy",
@@ -68,8 +72,8 @@ def parse_args():
     )
 
     args = parser.parse_args()
-    if args.router_training_steps != 0:
-        raise ValueError("Full-observation oracle-assisted training expects router_training_steps=0.")
+    if args.router_training_steps < 0:
+        raise ValueError("router_training_steps must be >= 0.")
     if args.router_ranking_loss_weight != 0:
         raise ValueError("Full-observation oracle-assisted training expects router_ranking_loss_weight=0.")
     if not args.measurement_topk_updates_model:
@@ -85,6 +89,11 @@ class FullObservationOracleTrainer(example_pretrain.OurTrainer):
         super().__init__(config)
         if not config.model.use_moe:
             raise ValueError("Full-observation oracle training requires --use_moe.")
+        self._initial_streaming_global_skip_batches = getattr(
+            self.train_dataset,
+            "global_skip_batches",
+            None,
+        )
 
     def _iter_moe_layers(self):
         for block in self.raw_model.blocks:
@@ -107,6 +116,15 @@ class FullObservationOracleTrainer(example_pretrain.OurTrainer):
         for moe in self._iter_moe_layers():
             for param in moe.router.parameters():
                 param.requires_grad_(enabled)
+
+    def _is_router_param(self, name: str) -> bool:
+        return ".router." in name or name.startswith("router.")
+
+    def _set_router_only_trainable(self) -> None:
+        for name, param in self.raw_model.named_parameters():
+            param.requires_grad_(self._is_router_param(name))
+        self._set_moe_routing_strategy("learned")
+        self._clear_moe_warmup_state()
 
     def _set_moe_routing_strategy(self, routing_strategy: str) -> None:
         for moe in self._iter_moe_layers():
@@ -225,6 +243,90 @@ class FullObservationOracleTrainer(example_pretrain.OurTrainer):
         if self.master_process and step % config.logging.log_every == 0:
             print(f"[moe_router] step {step} phase={phase}", flush=True)
 
+    def _reset_train_data_for_router_phase(self) -> None:
+        self.train_loader_iter_idx = 0
+        if self.train_sampler is not None:
+            self.train_sampler_epoch = 0
+            self.train_sampler.set_epoch(self.train_sampler_epoch)
+        if self._initial_streaming_global_skip_batches is not None and hasattr(
+            self.train_dataset,
+            "global_skip_batches",
+        ):
+            self.train_dataset.global_skip_batches = self._initial_streaming_global_skip_batches
+        if hasattr(self.train_dataset, "set_epoch"):
+            self.train_dataset.set_epoch(0)
+        self.train_loader_iter = enumerate(self.train_loader)
+
+    def train_router(self) -> None:
+        router_steps = int(self.oracle_cfg.router_training_steps)
+        if router_steps <= 0:
+            return
+
+        if self.master_process:
+            print(f"[moe_router] starting router-only phase for {router_steps} steps", flush=True)
+
+        self._set_router_only_trainable()
+        self._reset_train_data_for_router_phase()
+
+        for step in tqdm(
+            range(router_steps),
+            total=router_steps,
+            desc="Train Router",
+            disable=not self.master_process,
+        ):
+            self.one_step_results = {}
+            t0 = time.time()
+            last_step = step == router_steps - 1
+            with self.profiler_record_fn("router_training_step"):
+                super()._one_training_step(self.config, step)
+            self.one_step_results["moe/router_phase"] = "router_only"
+            torch.cuda.synchronize()
+            if self.profiler:
+                self.profiler.step()
+            if (
+                self.config.ckpt.do_save
+                and not self.config.train.debug
+                and step > 0
+                and (step % self.config.ckpt.save_every_steps == 0 or last_step)
+            ):
+                self.save(self.training_info["max_steps"] + step)
+
+            t1 = time.time()
+            dt = t1 - t0
+            tokens_processed = (
+                self.config.train.batch_size
+                * self.config.train.seq_len
+                * self.training_info["grad_accum_steps"]
+                * self.dp_world_size
+            )
+            tokens_per_sec = tokens_processed / dt
+            mfu, _, _ = compute_mfu(
+                self.raw_model,
+                self.config.train.batch_size,
+                self.config.train.seq_len,
+                dt,
+                self.training_info["grad_accum_steps"],
+                dtype="bf16",
+            )
+            if self.master_process:
+                tqdm.write(
+                    f"router step {step:5d}/{router_steps} | "
+                    f"loss: {self.one_step_results['loss'].item():.6f} | "
+                    f"lr {self.one_step_results['lr']:.4e} | "
+                    f"grad norm: {self.one_step_results['grad_norm']:.4f} | "
+                    f"dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f} | "
+                    f"MFU: {mfu*100:.2f}%"
+                )
+                with open(self.log_file, "a") as f:
+                    f.write(f"router {step} train {self.one_step_results['loss'].item():.6f}\n")
+            self.results[f"router/{step}"] = self.one_step_results
+
+        if self.master_process:
+            print("[moe_router] router-only phase finished", flush=True)
+
+    def _after_train_loop(self):
+        self.train_router()
+
 
 def main():
     args = parse_args()
@@ -242,8 +344,12 @@ def main():
         expert_warmup_steps=args.expert_warmup_steps,
         warmup_routing_strategy=args.warmup_routing_strategy,
         measurement_topk_updates_model=bool(args.measurement_topk_updates_model),
+        router_training_steps=int(args.router_training_steps),
     )
-    if oracle_cfg.expert_warmup_steps > 0 and not cfg.parallel.ddp_find_unused_parameters:
+    if (
+        (oracle_cfg.expert_warmup_steps > 0 or oracle_cfg.router_training_steps > 0)
+        and not cfg.parallel.ddp_find_unused_parameters
+    ):
         cfg = replace(
             cfg,
             parallel=replace(cfg.parallel, ddp_find_unused_parameters=True),
