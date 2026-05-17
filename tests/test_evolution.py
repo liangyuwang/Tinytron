@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 
 
 def sample_spec_dict():
@@ -102,6 +103,48 @@ class EvolutionSpecTest(unittest.TestCase):
         self.assertEqual(artifact.config["training"]["stage"], "rl")
         self.assertIn("bash scripts/debug/rl.sh", artifact.commands)
         self.assertTrue(artifact.is_complete)
+
+    def test_public_api_and_registry_support_agent_control_loop(self) -> None:
+        from pathlib import Path
+
+        from evolution import (
+            EvalResult,
+            EvolutionRegistry,
+            EvolutionSpec,
+            ExperimentRunner,
+            evaluate_promotion,
+            render_report,
+            save_spec,
+            load_spec,
+            translate_spec,
+        )
+
+        spec = EvolutionSpec.from_dict(sample_spec_dict())
+        decision = evaluate_promotion(
+            spec,
+            [
+                EvalResult("math_holdout", baseline=0.50, candidate=0.53),
+                EvalResult("general_regression", baseline=0.60, candidate=0.598),
+            ],
+        )
+        artifact = translate_spec(spec, "tinytron")
+        report = render_report(spec, decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec_path = root / "spec.json"
+            save_spec(spec, spec_path)
+            self.assertEqual(load_spec(spec_path).id, spec.id)
+
+            registry = EvolutionRegistry(root / "registry")
+            self.assertTrue(registry.record_spec(spec).exists())
+            self.assertTrue(registry.record_artifact(spec.id, artifact).exists())
+            self.assertTrue(registry.record_decision(spec.id, decision).exists())
+            self.assertTrue(registry.record_report(spec.id, report).exists())
+
+            prepared = ExperimentRunner(root).prepare(spec, "tinytron")
+            self.assertTrue(prepared.is_runnable)
+            self.assertEqual(prepared.commands, artifact.commands)
 
 
 if __name__ == "__main__":

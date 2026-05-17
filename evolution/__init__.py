@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from .api import evaluate_promotion, load_spec, render_report, save_spec, translate_spec, validate_spec
 from .promotion import EvalResult, PromotionDecision, SuiteDecision, decide_promotion
+from .registry import EvolutionRegistry
 from .report import render_evolution_report
+from .runtime import ExperimentRunner, PreparedExperiment
 from .spec import (
     AblationEvidenceSpec,
     AgentSpec,
@@ -25,7 +28,15 @@ from .spec import (
     TrainingSpec,
     validate_evolution_spec,
 )
-from .translators import FrameworkTranslator, TinytronTranslator, TranslationArtifact, TranslationError
+from .translators import (
+    FrameworkTranslator,
+    TinytronTranslator,
+    TranslationArtifact,
+    TranslationError,
+    available_translators,
+    get_translator,
+    register_translator,
+)
 
 __all__ = [
     "AblationEvidenceSpec",
@@ -40,13 +51,16 @@ __all__ = [
     "EvalSpec",
     "EvalSuiteSpec",
     "EvidenceSpec",
+    "EvolutionRegistry",
     "EvolutionSpec",
+    "ExperimentRunner",
     "FrameworkTranslator",
     "LossSpec",
     "ModelSpec",
     "OptimizerSpec",
     "PromotionDecision",
     "PromotionSpec",
+    "PreparedExperiment",
     "RunEvidenceSpec",
     "ScheduleSpec",
     "SpecValidationError",
@@ -55,7 +69,16 @@ __all__ = [
     "TrainingSpec",
     "TranslationArtifact",
     "TranslationError",
+    "available_translators",
     "decide_promotion",
+    "evaluate_promotion",
+    "get_translator",
+    "load_spec",
+    "register_translator",
     "render_evolution_report",
+    "render_report",
+    "save_spec",
+    "translate_spec",
     "validate_evolution_spec",
+    "validate_spec",
 ]
