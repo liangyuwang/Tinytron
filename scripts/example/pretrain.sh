@@ -47,7 +47,7 @@ GBS=${GBS:-1024}                   # global batch size in number of sequences
 SEP_SIZE=${SEP_SIZE:-1}
 
 # Streaming dataset path (processed by Streaming-Dataloader)
-STREAMING_DATA_DIR=${STREAMING_DATA_DIR:-./data/fineweb-edu-sample-10BT}
+STREAMING_DATA_DIR=${STREAMING_DATA_DIR:-./data/fineweb-edu-sample-100BT}
 
 # Data loader
 NUM_WORKERS=${NUM_WORKERS:-2}
@@ -72,7 +72,7 @@ RESUME_PATH=${RESUME_PATH:-}
 # Derived config
 # ----------------
 TOTAL_BATCH_SIZE=$(($GBS * $SEQ_LEN))
-BATCH_SIZE_PER_DP_RANK=$(($BATCH_SIZE * $SEP_SIZE))
+BATCH_SIZE_PER_DP_RANK=$BATCH_SIZE  # $(($BATCH_SIZE * $SEP_SIZE))
 
 DISTRIBUTED_ARGS="\
  --nnodes=$NUM_NODES \
