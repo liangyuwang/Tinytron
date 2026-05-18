@@ -202,7 +202,16 @@ class Trainer:
         if config.train.use_compile and hasattr(torch, 'compile'):
             model = torch.compile(model)
         #TODO: Here ZeRO-1 actually only need 'reduce' not 'all-reduce' used in DDP, we can develop a custom wrapper for ZeRO-1
-        self.model = DDP(model, process_group=self.dp_group, find_unused_parameters=config.parallel.ddp_find_unused_parameters, gradient_as_bucket_view=config.parallel.ddp_gradient_as_bucket_view)
+        gradient_as_bucket_view = (
+            config.parallel.ddp_gradient_as_bucket_view
+            and self.sp_world_size == 1
+        )
+        self.model = DDP(
+            model,
+            process_group=self.dp_group,
+            find_unused_parameters=config.parallel.ddp_find_unused_parameters,
+            gradient_as_bucket_view=gradient_as_bucket_view,
+        )
         self.raw_model = self.model.module
 
     def _init_optimizer(self, config: Config):

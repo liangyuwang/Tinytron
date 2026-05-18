@@ -369,6 +369,8 @@ class Attention(nn.Module):
             y = y.permute(2, 0, 1, 3, 4).contiguous()
             y = ulysses_all_to_all(y, sp_group)
             y = y.permute(1, 0, 2, 3, 4).contiguous()
+            y = y.permute(0, 3, 1, 2, 4).contiguous().reshape(B, T_local, C)
+            return self.c_proj(y)
 
         y = y.transpose(-2, -3).reshape(B, T_local, C)
         return self.c_proj(y)
