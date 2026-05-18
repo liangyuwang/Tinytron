@@ -11,7 +11,7 @@ Record these fields for each run:
 - Baseline: model size, data path, optimizer, batch size, seq len, SEP size, seed, precision.
 - Variant: only the intentional differences from baseline.
 - Command: exact launch command or script environment variables.
-- Code state: commit SHA or patch summary.
+- Code state: `base_commit`, `candidate_commit`, `infra_commit`, branch/ref, worktree path, diff hash, or patch summary.
 - Checkpoint/layout state: checkpoint source, SEP size, whether resume used same-layout optimizer restore or model-only reshard.
 - Metrics: loss, validation loss if available, tok/sec, MFU, peak memory if available, prefill/decode tokens/sec for inference.
 - Notes: failures, instability, OOMs, profiler findings, caveats.
@@ -40,6 +40,7 @@ Hypothesis:
 Change:
 Baseline command:
 Variant command:
+Git state:
 Validation:
 Results:
 Caveats:

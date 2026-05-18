@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from .api import evaluate_promotion, load_spec, render_report, save_spec, translate_spec, validate_spec
+from .git_backend import GitBackend, GitCommandError, GitExperimentState
 from .promotion import EvalResult, PromotionDecision, SuiteDecision, decide_promotion
 from .registry import EvolutionRegistry
 from .report import render_evolution_report
 from .runtime import ExperimentRunner, PreparedExperiment
+from .safety import EvolutionSafetyError, require_clean_worktree, validate_experiment_branch, validate_promotion_ref
 from .spec import (
     AblationEvidenceSpec,
     AgentSpec,
@@ -51,10 +53,14 @@ __all__ = [
     "EvalSpec",
     "EvalSuiteSpec",
     "EvidenceSpec",
+    "EvolutionSafetyError",
     "EvolutionRegistry",
     "EvolutionSpec",
     "ExperimentRunner",
     "FrameworkTranslator",
+    "GitBackend",
+    "GitCommandError",
+    "GitExperimentState",
     "LossSpec",
     "ModelSpec",
     "OptimizerSpec",
@@ -77,8 +83,11 @@ __all__ = [
     "register_translator",
     "render_evolution_report",
     "render_report",
+    "require_clean_worktree",
     "save_spec",
     "translate_spec",
+    "validate_experiment_branch",
     "validate_evolution_spec",
+    "validate_promotion_ref",
     "validate_spec",
 ]

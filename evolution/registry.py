@@ -5,6 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .git_backend import GitExperimentState
 from .promotion import PromotionDecision
 from .spec import EvolutionSpec
 from .translators import TranslationArtifact
@@ -23,6 +24,7 @@ class EvolutionRegistry:
         self.specs_dir = self.root / "specs"
         self.artifacts_dir = self.root / "artifacts"
         self.decisions_dir = self.root / "decisions"
+        self.git_dir = self.root / "git"
         self.reports_dir = self.root / "reports"
 
     def initialize(self) -> None:
@@ -30,6 +32,7 @@ class EvolutionRegistry:
             self.specs_dir,
             self.artifacts_dir,
             self.decisions_dir,
+            self.git_dir,
             self.reports_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
@@ -61,6 +64,12 @@ class EvolutionRegistry:
         _write_json(path, asdict(decision))
         return path
 
+    def record_git_state(self, spec_id: str, state: GitExperimentState) -> Path:
+        self.initialize()
+        path = self.git_state_path(spec_id)
+        _write_json(path, state.to_dict())
+        return path
+
     def record_report(self, spec_id: str, report: str) -> Path:
         self.initialize()
         path = self.report_path(spec_id)
@@ -75,6 +84,9 @@ class EvolutionRegistry:
 
     def decision_path(self, spec_id: str) -> Path:
         return self.decisions_dir / f"{_safe_id(spec_id)}.json"
+
+    def git_state_path(self, spec_id: str) -> Path:
+        return self.git_dir / f"{_safe_id(spec_id)}.json"
 
     def report_path(self, spec_id: str) -> Path:
         return self.reports_dir / f"{_safe_id(spec_id)}.md"

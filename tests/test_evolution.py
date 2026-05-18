@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import unittest
+from pathlib import Path
+import subprocess
 import tempfile
+import unittest
 
 
 def sample_spec_dict():
@@ -145,6 +147,78 @@ class EvolutionSpecTest(unittest.TestCase):
             prepared = ExperimentRunner(root).prepare(spec, "tinytron")
             self.assertTrue(prepared.is_runnable)
             self.assertEqual(prepared.commands, artifact.commands)
+
+    def test_git_backend_prepares_isolated_experiment_worktree(self) -> None:
+        from evolution import EvolutionRegistry, GitBackend
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_git_repo(Path(tmp) / "repo")
+            backend = GitBackend(repo)
+
+            state = backend.prepare_experiment(
+                "router-entropy-v1",
+                worktree_root=Path(tmp) / "worktrees",
+            )
+
+            self.assertEqual(state.branch, "exp/router-entropy-v1")
+            self.assertEqual(state.base_commit, state.candidate_commit)
+            self.assertEqual(len(state.diff_hash), 64)
+            self.assertTrue(Path(state.worktree_path).exists())
+
+            registry = EvolutionRegistry(Path(tmp) / "registry")
+            path = registry.record_git_state(state.spec_id, state)
+            self.assertTrue(path.exists())
+            self.assertIn("base_commit", path.read_text(encoding="utf-8"))
+
+    def test_git_backend_rejects_dirty_repo_and_unsafe_branch(self) -> None:
+        from evolution import EvolutionSafetyError, GitBackend
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_git_repo(Path(tmp) / "repo")
+            backend = GitBackend(repo)
+
+            with self.assertRaisesRegex(EvolutionSafetyError, "namespace"):
+                backend.prepare_experiment(
+                    "bad-branch",
+                    branch="main",
+                    require_clean_repo=False,
+                    worktree_root=Path(tmp) / "worktrees",
+                )
+
+            (repo / "README.md").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(EvolutionSafetyError, "dirty"):
+                backend.prepare_experiment(
+                    "dirty",
+                    worktree_root=Path(tmp) / "worktrees",
+                )
+
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _run_git(path, "init")
+    _run_git(path, "checkout", "-b", "main")
+    (path / "README.md").write_text("tinytron\n", encoding="utf-8")
+    _run_git(path, "add", "README.md")
+    _run_git(
+        path,
+        "-c",
+        "user.name=Tinytron",
+        "-c",
+        "user.email=tinytron@example.com",
+        "commit",
+        "-m",
+        "init",
+    )
+    return path
+
+
+def _run_git(path: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 if __name__ == "__main__":
