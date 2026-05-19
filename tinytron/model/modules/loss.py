@@ -67,14 +67,18 @@ class ExpertLoadBalancingLoss(nn.Module):
             expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).float()
             local_f_i_sum = expert_mask.sum(dim=[0, 1])
 
-        stats = torch.cat([local_P_i_sum, local_f_i_sum])
-        dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=parallel_state.get_ep_group())
-        global_P_i_sum, global_f_i_sum = stats.chunk(2)
-        global_tokens = torch.tensor(float(local_tokens), device=gate_logits.device)
-        dist.all_reduce(global_tokens, op=dist.ReduceOp.SUM, group=parallel_state.get_ep_group())
-        global_tokens = global_tokens.clamp(min=1.0)
+        with torch.no_grad():
+            tokens_per_replica = torch.tensor(float(local_tokens), device=gate_logits.device)
+            dist.all_reduce(tokens_per_replica, op=dist.ReduceOp.SUM, group=parallel_state.get_ep_group())
+            tokens_per_replica = tokens_per_replica.clamp(min=1.0)
 
-        P_i = global_P_i_sum / global_tokens
+            global_f_i_sum = local_f_i_sum.detach().clone()
+            dist.all_reduce(global_f_i_sum, op=dist.ReduceOp.SUM, group=parallel_state.get_dp_sp_group())
+            global_tokens = torch.tensor(float(local_tokens), device=gate_logits.device)
+            dist.all_reduce(global_tokens, op=dist.ReduceOp.SUM, group=parallel_state.get_dp_sp_group())
+            global_tokens = global_tokens.clamp(min=1.0)
+
+        P_i = local_P_i_sum / tokens_per_replica
         f_i = global_f_i_sum / (global_tokens * self.top_k)
 
         loss = self.alpha * self.num_experts * torch.sum(f_i * P_i)

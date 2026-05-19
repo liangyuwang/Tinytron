@@ -192,7 +192,12 @@ class Trainer:
         return collate
 
     def _init_model(self, config: Config):
-        torch.set_float32_matmul_precision('high')
+        if config.seed.deterministic and config.train.precision == "fp32":
+            torch.set_float32_matmul_precision("highest")
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+        else:
+            torch.set_float32_matmul_precision('high')
         self.model_config = config.model
         # self.model_config.seed = config.seed.seed
         model = GPT(self.model_config)
@@ -206,13 +211,17 @@ class Trainer:
             config.parallel.ddp_gradient_as_bucket_view
             and self.sp_world_size == 1
         )
-        self.model = DDP(
-            model,
-            process_group=self.dp_group,
-            find_unused_parameters=config.parallel.ddp_find_unused_parameters,
-            gradient_as_bucket_view=gradient_as_bucket_view,
-        )
-        self.raw_model = self.model.module
+        if self.dp_world_size > 1:
+            self.model = DDP(
+                model,
+                process_group=self.dp_group,
+                find_unused_parameters=config.parallel.ddp_find_unused_parameters,
+                gradient_as_bucket_view=gradient_as_bucket_view,
+            )
+            self.raw_model = self.model.module
+        else:
+            self.model = model
+            self.raw_model = model
 
     def _init_optimizer(self, config: Config):
         if config.optim.optimizer == "adam":
@@ -364,7 +373,12 @@ class Trainer:
         valid_tokens_accum = torch.tensor(0, device=f"cuda:{self.local_rank}", dtype=torch.long)
         for micro_step in range(self.training_info["grad_accum_steps"]):
             batch = self._next_train_batch()
-            self.model.require_backward_grad_sync = (micro_step == self.training_info["grad_accum_steps"] - 1)
+            sync_each_micro_step = os.environ.get("TINYTRON_SYNC_EACH_MICRO_STEP", "0") == "1"
+            if isinstance(self.model, DDP):
+                self.model.require_backward_grad_sync = (
+                    sync_each_micro_step
+                    or micro_step == self.training_info["grad_accum_steps"] - 1
+                )
             logging_loss, valid_token_count = self._one_training_micro_step(config, micro_step, batch)
             loss_accum += logging_loss
             valid_tokens_accum += valid_token_count

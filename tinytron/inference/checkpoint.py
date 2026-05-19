@@ -48,7 +48,7 @@ def load_model_state_dict_for_inference(
     if checkpoint_prefix is not None:
         meta_path = checkpoint_meta_path(checkpoint_prefix)
         if os.path.exists(meta_path):
-            meta = torch.load(meta_path, map_location="cpu", weights_only=True)
+            meta = torch.load(meta_path, map_location="cpu")
             if _has_sharded_model_checkpoint(checkpoint_prefix, meta):
                 return _reshard_model_state_dict_from_files(checkpoint_prefix, model_config, meta)
 

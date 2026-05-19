@@ -1,3 +1,6 @@
+import os
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +10,7 @@ from tinytron.model.config import ModelConfig
 from tinytron.distributed import (
     parallel_state,
     ep_all_to_all,
+    ep_all_to_all_no_grad,
 )
 
 class MLP(nn.Module):
@@ -80,6 +84,18 @@ class MoE(nn.Module):
         self.experts_down_weights = nn.Parameter(torch.empty(self.num_local_experts, self.hidden_size, self.intermediate_size, device=self.device))
         self.experts_act_fn = nn.SiLU()
         self._init_expert_weights(config.seed, layer_idx)
+
+    def _trace(self, message: str, *, sync: bool = False) -> None:
+        if os.environ.get("TINYTRON_MOE_TRACE", "0") != "1":
+            return
+        if sync and torch.cuda.is_available():
+            torch.cuda.synchronize(self.device)
+        if dist.is_available() and dist.is_initialized():
+            rank = dist.get_rank()
+        else:
+            rank = 0
+        now = time.strftime("%H:%M:%S")
+        print(f"[moe-trace {now} rank={rank} layer={self.layer_idx}] {message}", flush=True)
     
     def _init_expert_weights(self, base_seed: int, layer_idx: int):
         if dist.is_available() and dist.is_initialized():
@@ -105,13 +121,28 @@ class MoE(nn.Module):
             torch.manual_seed(base_seed + layer_idx)
             nn.init.normal_(self.router.weight, mean=0.0, std=self.config.init_std)
 
+    def _zero_expert_weight_dependency(self) -> torch.Tensor:
+        return (
+            self.experts_gate_weights.reshape(-1)[0]
+            + self.experts_up_weights.reshape(-1)[0]
+            + self.experts_down_weights.reshape(-1)[0]
+        ) * 0.0
+
     def _apply_local_experts(
         self,
         received_x: torch.Tensor,
         received_experts: torch.Tensor,
     ) -> torch.Tensor:
         if received_experts.numel() == 0:
-            return received_x.new_empty((0, self.hidden_size))
+            # Preserve the autograd edge to the preceding EP all-to-all. If this
+            # returns a fresh empty tensor, ranks with no local tokens skip that
+            # all-to-all in backward while other ranks still enter it.
+            target_dtype = (
+                torch.get_autocast_gpu_dtype()
+                if torch.is_autocast_enabled("cuda")
+                else received_x.dtype
+            )
+            return received_x.reshape(0, self.hidden_size).to(dtype=target_dtype)
 
         local_expert_indices = received_experts % self.num_local_experts
         local_sort_idx = torch.argsort(local_expert_indices)
@@ -119,6 +150,10 @@ class MoE(nn.Module):
         local_expert_indices = local_expert_indices[local_sort_idx]
         counts = torch.bincount(local_expert_indices, minlength=self.num_local_experts)
         offs = torch.cumsum(counts, dim=0).to(torch.int32)
+        self._trace(
+            f"apply_local start tokens={local_x.size(0)} counts={counts.detach().cpu().tolist()}",
+            sync=True,
+        )
         if self.grouped_gemm_supported:
             gate_out = F.grouped_mm(local_x, self.experts_gate_weights, offs=offs)
             up_out = F.grouped_mm(local_x, self.experts_up_weights, offs=offs)
@@ -138,18 +173,21 @@ class MoE(nn.Module):
                 starts[1:] = offs[:-1]
                 relative_idx = torch.arange(len(local_x), device=local_x.device) - starts[local_expert_indices]
                 padded_x = torch.zeros(
-                    self.num_local_experts, max_tokens, self.hidden_size, 
+                    self.num_local_experts, max_tokens, self.hidden_size,
                     dtype=local_x.dtype, device=local_x.device
                 )
                 padded_x = padded_x.index_put((local_expert_indices, relative_idx), local_x)
-                
+                self._trace(f"slow_path padded_bmm start max_tokens={max_tokens}", sync=True)
+
                 gate_out_padded = torch.bmm(padded_x, self.experts_gate_weights.transpose(1, 2))
                 up_out_padded = torch.bmm(padded_x, self.experts_up_weights.transpose(1, 2))
                 act_out_padded = self.experts_act_fn(gate_out_padded) * up_out_padded
                 down_out_padded = torch.bmm(act_out_padded, self.experts_down_weights.transpose(1, 2))
                 down_out = down_out_padded[local_expert_indices, relative_idx]
+                self._trace("slow_path padded_bmm done", sync=True)
 
         rev_local_sort_idx = torch.argsort(local_sort_idx)
+        self._trace("apply_local done", sync=True)
         return down_out[rev_local_sort_idx].contiguous()
 
     def _forward_sep_local_reduce_inference(
@@ -223,26 +261,37 @@ class MoE(nn.Module):
             sorted_experts = selected_experts[global_sort_idx].contiguous()
             send_splits_tensor = torch.bincount(target_ep_ranks, minlength=ep_world_size)
             recv_splits_tensor = torch.empty_like(send_splits_tensor)
+            self._trace(f"splits all_to_all start send={send_splits_tensor.detach().cpu().tolist()}", sync=True)
             dist.all_to_all_single(recv_splits_tensor, send_splits_tensor, group=ep_group)
             send_splits, recv_splits = torch.stack([send_splits_tensor, recv_splits_tensor]).cpu().tolist()
+            self._trace(f"splits all_to_all done recv={recv_splits}", sync=True)
+            self._trace(f"x all_to_all start send={send_splits} recv={recv_splits}", sync=True)
             received_x = ep_all_to_all(sorted_x, send_splits, recv_splits, ep_group)
-            received_experts = torch.empty(sum(recv_splits), dtype=sorted_experts.dtype, device=x.device)
-            dist.all_to_all_single(
-                received_experts, sorted_experts,
-                output_split_sizes=recv_splits, input_split_sizes=send_splits, group=ep_group
+            self._trace(f"x all_to_all done received={received_x.size(0)}", sync=True)
+            self._trace("experts all_to_all start", sync=True)
+            received_experts = ep_all_to_all_no_grad(
+                sorted_experts,
+                send_splits,
+                recv_splits,
+                ep_group,
             )
+            self._trace("experts all_to_all done", sync=True)
         else:
             received_x = flat_x
             received_experts = selected_experts
 
         out_x = self._apply_local_experts(received_x, received_experts)
         if ep_world_size > 1:
+            self._trace(f"out all_to_all start send={recv_splits} recv={send_splits}", sync=True)
             combined_x = ep_all_to_all(out_x, recv_splits, send_splits, ep_group)
+            self._trace("out all_to_all done", sync=True)
             rev_global_sort_idx = torch.argsort(global_sort_idx)
             unpermuted_x = combined_x[rev_global_sort_idx]
         else:
             unpermuted_x = out_x
         unpermuted_x = unpermuted_x * weights.unsqueeze(-1)
         final_x = unpermuted_x.view(B * T, self.top_k, D).sum(dim=1)
+        if self.training:
+            final_x = final_x + self._zero_expert_weight_dependency()
 
         return final_x.reshape(B, T, D), gate_logits

@@ -25,7 +25,11 @@ class InferenceEngine:
     ):
         self.device = torch.device(device)
         if self.device.type == "cuda":
-            torch.cuda.set_device(self.device)
+            if self.device.index is None:
+                torch.cuda.set_device(0)
+                self.device = torch.device("cuda:0")
+            else:
+                torch.cuda.set_device(self.device)
         self.model_config = model_config
         self.use_paged_kv_cache = use_paged_kv_cache
         self.kv_cache_page_size = kv_cache_page_size

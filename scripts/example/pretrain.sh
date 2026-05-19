@@ -21,6 +21,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 cd "$REPO_ROOT"
 
+export CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-:4096:8}
+
 # Multi-node configuration (can be overridden by environment variables)
 NUM_NODES=${NUM_NODES:-1}
 NUM_GPUS=${NUM_GPUS:-8}
@@ -39,12 +41,25 @@ BATCH_SIZE=${BATCH_SIZE:-8}
 SEQ_LEN=${SEQ_LEN:-4096}
 GBS=${GBS:-128}
 TOTAL_BATCH_SIZE=$(($GBS * $SEQ_LEN))
+MAX_STEPS=${MAX_STEPS:-}
+MAX_EPOCHS=${MAX_EPOCHS:-1}
+LOG_EVERY=${LOG_EVERY:-10}
+STREAMING_DATA_DIR=${STREAMING_DATA_DIR:-../../dataset/fineweb-edu-sample-10BT}
 
 SEP_SIZE=${SEP_SIZE:-1}
-BATCH_SIZE_PER_DP_RANK=$(($BATCH_SIZE * $SEP_SIZE))
+BATCH_SIZE_SCALE_WITH_SEP=${BATCH_SIZE_SCALE_WITH_SEP:-1}
+if [ $BATCH_SIZE_SCALE_WITH_SEP -eq 1 ]; then
+  BATCH_SIZE_PER_DP_RANK=$(($BATCH_SIZE * $SEP_SIZE))
+else
+  BATCH_SIZE_PER_DP_RANK=$BATCH_SIZE
+fi
 USE_COMPILE=${USE_COMPILE:-1}
+USE_DISTRIBUTED_OPTIMIZER=${USE_DISTRIBUTED_OPTIMIZER:-1}
 
 DEBUG=${DEBUG:-1}
+DO_SAVE=${DO_SAVE:-1}
+SAVE_EVERY_STEPS=${SAVE_EVERY_STEPS:-500}
+PRECISION=${PRECISION:-bf16}
 DETER_MODE=${DETER_MODE:-0} # deter mode for precision alignment
 MODEL_SIZE=${MODEL_SIZE:-0.25B}
 MOE_BALANCE_LOSS_WEIGHT=${MOE_BALANCE_LOSS_WEIGHT:-}
@@ -61,18 +76,27 @@ LOG_DIR=${LOG_DIR:-"$SCRIPT_DIR/example_gpt_${MODEL_SIZE}"}
 TRAINING_ARGS="\
   --seed $SEED \
   --log_dir $LOG_DIR \
+  --log_every $LOG_EVERY \
+  --streaming_data_dir $STREAMING_DATA_DIR \
   --total_batch_size $TOTAL_BATCH_SIZE \
   --batch_size $BATCH_SIZE_PER_DP_RANK \
   --seq_len $SEQ_LEN \
+  --precision $PRECISION \
   --max_lr $MAX_LR \
   --min_lr $MIN_LR \
   --weight_decay 0.1 \
   --grad_clip_value 1.0 \
   --warmup_steps $LR_WARMUP_STEPS \
-  --max_epochs 1 \
-  --do_save \
-  --save_every_steps 500 \
+  --save_every_steps $SAVE_EVERY_STEPS \
 "
+if [ $DO_SAVE -eq 1 ]; then
+  TRAINING_ARGS="$TRAINING_ARGS --do_save"
+fi
+if [ -n "$MAX_STEPS" ]; then
+  TRAINING_ARGS="$TRAINING_ARGS --max_steps $MAX_STEPS"
+else
+  TRAINING_ARGS="$TRAINING_ARGS --max_epochs $MAX_EPOCHS"
+fi
 if [ $DEBUG -eq 1 ]; then
   TRAINING_ARGS="$TRAINING_ARGS --debug"
 fi
@@ -85,8 +109,12 @@ fi
 
 PARALLELISM_ARGS="\
   --sep_size $SEP_SIZE \
-  --use_distributed_optimizer \
 "
+if [ $USE_DISTRIBUTED_OPTIMIZER -eq 1 ]; then
+  PARALLELISM_ARGS="$PARALLELISM_ARGS --use_distributed_optimizer"
+else
+  PARALLELISM_ARGS="$PARALLELISM_ARGS --no-use_distributed_optimizer"
+fi
 
 case $MODEL_SIZE in
     "0.03B"|"0.03b")

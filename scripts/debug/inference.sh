@@ -42,6 +42,8 @@ SEP_SIZE=${SEP_SIZE:-1}
 NPROC_PER_NODE=${NPROC_PER_NODE:-$SEP_SIZE}
 BACKEND=${BACKEND:-nccl}
 INIT_METHOD=${INIT_METHOD:-env://}
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+MASTER_PORT=${MASTER_PORT:-29500}
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -219,7 +221,11 @@ fi
 
 echo "Running inference with MODEL_SIZE=${MODEL_SIZE}, DEVICE=${DEVICE}, DTYPE=${DTYPE}, SEP_SIZE=${SEP_SIZE}"
 if [[ "${SEP_SIZE}" -gt 1 ]]; then
-  torchrun --nproc_per_node "${NPROC_PER_NODE}" scripts/debug/inference.py "${ARGS[@]}"
+  torchrun \
+    --nproc_per_node "${NPROC_PER_NODE}" \
+    --master_addr "${MASTER_ADDR}" \
+    --master_port "${MASTER_PORT}" \
+    scripts/debug/inference.py "${ARGS[@]}"
 else
   python scripts/debug/inference.py "${ARGS[@]}"
 fi
